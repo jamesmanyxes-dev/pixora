@@ -1,0 +1,17 @@
+{
+  "appId": "com.pixora.app",
+  "appName": "Pixora",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "url": "https://01a0d978-a6e4-742e-a951-1b70851908b2.skydive.app",
+    "cleartext": false,
+    "androidScheme": "https"
+  },
+  "android": { "allowMixedContent": false, "backgroundColor": "#0a0a0a" },
+  "ios": { "backgroundColor": "#0a0a0a" },
+  "plugins": {
+    "PushNotifications": { "presentationOptions": ["badge", "sound", "alert"] },
+    "SplashScreen": { "launchShowDuration": 1500, "backgroundColor": "#0a0a0a", "androidScaleType": "CENTER_CROP" }
+  }
+}

@@ -1,0 +1,45 @@
+# PIXORA free-tier deployment — deploy with one click:
+# https://render.com/deploy?repo=https://github.com/jamesmanyxes-dev/pixora
+services:
+  - type: web
+    name: pixora
+    runtime: node
+    plan: free
+    rootDir: pixora/server
+    buildCommand: npm install && node migrate.js --once || true
+    startCommand: node index.js
+    healthCheckPath: /api/config
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pixora-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: OWNER_EMAIL
+        value: jamesmanyxes@gmail.com
+      - key: NODE_ENV
+        value: production
+      - key: PUSH_VAPID_PUBLIC
+        sync: false
+      - key: PUSH_VAPID_PRIVATE
+        sync: false
+
+databases:
+  - name: pixora-db
+    plan: free
+    databaseName: pixora
+    user: pixora
+
+  - type: web
+    name: pixora-console
+    runtime: node
+    plan: free
+    rootDir: pixora/server
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pixora-db
+          property: connectionString

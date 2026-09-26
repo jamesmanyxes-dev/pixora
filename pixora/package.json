@@ -1,0 +1,12 @@
+{
+  "name": "pixora",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "vite build",
+    "cap:sync": "cap sync",
+    "android": "cap open android",
+    "apk": "cd android && ./gradlew assembleRelease",
+    "aab": "cd android && ./gradlew bundleRelease"
+  }
+}

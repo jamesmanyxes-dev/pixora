@@ -1,0 +1,25 @@
+{
+  "name": "pixora-desktop",
+  "productName": "Pixora",
+  "version": "1.0.0",
+  "description": "Pixora for desktop — feed, reels, messaging, calls",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis portable",
+    "dist:mac": "electron-builder --mac dmg zip",
+    "dist:linux": "electron-builder --linux AppImage deb"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.pixora.desktop",
+    "productName": "Pixora",
+    "files": ["main.js", "icon.png"],
+    "win": { "icon": "icon.ico", "target": ["nsis", "portable"] },
+    "mac": { "icon": "icon.png", "target": ["dmg", "zip"], "category": "public.app-category.social-networking" },
+    "linux": { "icon": "icon.png", "target": ["AppImage", "deb"], "category": "Network" }
+  }
+}

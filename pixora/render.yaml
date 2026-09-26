@@ -1,0 +1,26 @@
+# PIXORA — Render blueprint (backend web service only; DB from Neon free tier)
+# 1. Create a free Postgres at https://neon.tech (always free, 0.5GB)
+# 2. Copy its connection string
+# 3. Paste it into the DATABASE_URL field when Render asks
+services:
+  - type: web
+    name: pixora
+    runtime: node
+    plan: free
+    rootDir: pixora/server
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /api/config
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: OWNER_EMAIL
+        value: jamesmanyxes@gmail.com
+      - key: NODE_ENV
+        value: production
+      - key: PUSH_VAPID_PUBLIC
+        sync: false
+      - key: PUSH_VAPID_PRIVATE
+        sync: false
