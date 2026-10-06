@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Pixora</string>
+    <string name="title_activity_main">Pixora</string>
+    <string name="package_name">com.pixora.app</string>
+    <string name="custom_url_scheme">com.pixora.app</string>
+</resources>
