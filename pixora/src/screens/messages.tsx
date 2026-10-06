@@ -81,7 +81,8 @@ export function Messages({ me, socket, onProfile, toast, onCall, deepParam }: { 
           const o = other(c);
           return (
             <button key={c.id} className="flex items-center gap-3 w-full px-4 py-3 hover:bg-neutral-900/60 text-left" onClick={() => setActive(c.id)}>
-              {c.is_group ? <div className="w-12 h-12 rounded-full bg-neutral-800 flex items-center justify-center"><Users size={20} className="text-neutral-400" /></div>
+              {c.is_group
+                ? (c.avatarUrl ? <Avatar src={c.avatarUrl} size={48} /> : <div className="w-12 h-12 rounded-full bg-neutral-800 flex items-center justify-center"><Users size={20} className="text-neutral-400" /></div>)
                 : <Avatar src={o?.avatarUrl} size={48} />}
               <div className="flex-1 min-w-0">
                 <div className="text-white text-sm font-semibold truncate">{c.is_group ? c.title || 'Group' : o?.username}</div>
@@ -195,9 +196,10 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
     setShowStickers(false);
     socket?.emit('typing:stop', { conversationId: convId });
     try {
-      const d = await api.post(`/conversations/${convId}/messages`, { body: ref, kind: 'sticker' });
+      const isMedia = ref.startsWith('/media/');
+      const d = await api.post(`/conversations/${convId}/messages`, isMedia ? { mediaUrl: ref, kind: 'sticker' } : { body: ref, kind: 'sticker' });
       setMessages(ms => ms.some(x => x.id === d.message.id) ? ms : [...ms, d.message]);
-    } catch (e: any) { toast(e.message || 'send failed — try again'); }
+    } catch (e: any) { toast(e.code === 'sticker_too_long' ? 'video stickers are 10 seconds max' : (e.message || 'send failed — try again')); }
   };
   const onType = () => {
     if (!typingTimer.current || Date.now() - typingTimer.current > 1500) socket?.emit('typing', { conversationId: convId });
@@ -286,7 +288,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
                 {m.forwarded && <div className="text-[10px] opacity-70 mb-0.5">↪ Forwarded</div>}
                 {m.pinned && <div className="text-[10px] opacity-70 mb-0.5">📌 Pinned</div>}
                 {m.deleted ? <span className="italic opacity-70 text-sm">deleted</span>
-                  : isSticker ? <StickerBody ref={m.body} />
+                  : isSticker ? <StickerBody ref={m.body} mediaMime={m.mediaMime} />
                   : m.kind === 'voice' ? <VoiceNote src={m.mediaUrl!} mineMsg={mineMsg} />
                     : m.kind !== 'text' ? (m.kind === 'video'
                         ? <video src={m.mediaUrl} controls onClick={() => setViewer({ url: m.mediaUrl!, kind: 'video' })} className="rounded-xl max-h-64 cursor-pointer" />
@@ -428,9 +430,12 @@ export const STICKER_EMOJI = ['😀','😂','🥹','😍','😎','🤩','🥳','
 // generated die-cut sticker packs served from /public/stickers
 export const STICKER_PACK = ['smiley','love','cool','cry','angry','party','thumbsup','fire','skull','heart','rocket','poop'];
 
-function StickerBody({ ref: sref }: { ref: string }) {
+function StickerBody({ ref: sref, mediaMime }: { ref: string; mediaMime?: string | null }) {
   if (!sref) return null;
-  if (sref.startsWith('/')) return <img src={sref} className="w-28 h-28 object-contain" alt="sticker" />;
+  if (sref.startsWith('/media/')) {
+    if (mediaMime?.startsWith('video/')) return <video src={sref} autoPlay loop muted playsInline className="w-32 h-32 object-cover rounded-xl" />;
+    return <img src={sref} className="w-28 h-28 object-contain" alt="sticker" />;
+  }
   return <span className="text-6xl leading-none block">{sref}</span>;
 }
 
@@ -447,9 +452,9 @@ function RenderBody({ body, members, mineMsg }: { body: string; members?: any[];
 
 function StickerPanel({ onPick, onClose, toast, onFavorite }: { onPick: (ref: string) => void; onClose: () => void; toast: (s: string) => void; onFavorite: (ref: string) => void }) {
   const [tab, setTab] = useState<'mine' | 'pack' | 'emoji'>('pack');
-  const [mine, setMine] = useState<string[]>([]);
+  const [mine, setMine] = useState<{ url: string; mime: string | null }[]>([]);
   const [creating, setCreating] = useState(false);
-  useEffect(() => { api.get('/stickers/mine').then(d => setMine(d.stickers || [])).catch(() => {}); }, []);
+  useEffect(() => { api.get('/stickers/mine').then(d => setMine((d.stickers || []).map((s: any) => typeof s === 'string' ? { url: s, mime: null } : s))).catch(() => {}); }, []);
   return (
     <>
       <div className="absolute bottom-full left-0 right-0 mb-1 bg-neutral-900 border border-neutral-800 rounded-2xl p-3 shadow-xl z-10">
@@ -467,14 +472,16 @@ function StickerPanel({ onPick, onClose, toast, onFavorite }: { onPick: (ref: st
         <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-56 overflow-y-auto">
           {tab === 'mine' && (mine.length
             ? mine.map(s => (
-              <button key={s} onClick={() => onPick(s)}
+              <button key={s.url} onClick={() => onPick(s.url)}
                 onContextMenu={e => e.preventDefault()}
-                onPointerDown={e => { const t = e.currentTarget as HTMLElement; const to = setTimeout(async () => { if (confirm('Remove this sticker?')) { const d = await api.post('/stickers/mine/delete', { mediaUrl: s }); setMine(d.stickers || []); } }, 600); const clear = () => { clearTimeout(to); t.removeEventListener('pointerup', clear); t.removeEventListener('pointerleave', clear); }; t.addEventListener('pointerup', clear); t.addEventListener('pointerleave', clear); }}
-                className="hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition">
-                <img src={s} className="w-full aspect-square object-contain" alt="sticker" loading="lazy" />
+                onPointerDown={e => { const t = e.currentTarget as HTMLElement; const to = setTimeout(async () => { if (confirm('Remove this sticker?')) { const d = await api.post('/stickers/mine/delete', { mediaUrl: s.url }); setMine(m => m.filter(x => x.url !== s.url)); } }, 600); const clear = () => { clearTimeout(to); t.removeEventListener('pointerup', clear); t.removeEventListener('pointerleave', clear); }; t.addEventListener('pointerup', clear); t.addEventListener('pointerleave', clear); }}
+                className="hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition" title="Tap to send · hold to remove">
+                {s.mime?.startsWith('video/')
+                  ? <video src={s.url} muted loop autoPlay playsInline className="w-full aspect-square object-cover rounded-lg" />
+                  : <img src={s.url} className="w-full aspect-square object-contain" alt="sticker" loading="lazy" />}
               </button>
             ))
-            : <p className="col-span-full text-center text-neutral-500 text-xs py-8">No personal stickers yet — tap + Create to make one from any photo</p>)}
+            : <p className="col-span-full text-center text-neutral-500 text-xs py-8">No personal stickers yet — tap + Create to make one from any photo or video</p>)}
           {tab === 'pack' && STICKER_PACK.map(s => (
             <button key={s} onClick={() => onPick(`/stickers/${s}.webp`)}
               onContextMenu={e => { e.preventDefault(); onFavorite(`/stickers/${s}.webp`); }}
@@ -488,14 +495,18 @@ function StickerPanel({ onPick, onClose, toast, onFavorite }: { onPick: (ref: st
           ))}
         </div>
       </div>
-      {creating && <StickerCreator onClose={() => setCreating(false)} onCreated={(url: string) => { setMine(m => [url, ...m].slice(0, 30)); setCreating(false); setTab('mine'); }} toast={toast} />}
+      {creating && <StickerCreator onClose={() => setCreating(false)} onCreated={(url: string) => { setMine(m => [{ url, mime: null }, ...m].slice(0, 30)); setCreating(false); setTab('mine'); }} toast={toast} />}
     </>
   );
 }
 
-// WhatsApp-style sticker maker: pick a photo, pan/zoom inside a square, save as a personal sticker
+// WhatsApp-style sticker maker: pick a photo OR a video (max 10s — longer is trimmed),
+// pan/zoom inside a square (images), save as a personal sticker
+declare global { interface Window { __stickerFile?: File } }
 function StickerCreator({ onClose, onCreated, toast }: { onClose: () => void; onCreated: (url: string) => void; toast: (s: string) => void }) {
   const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [isVideo, setIsVideo] = useState(false);
   const [saving, setSaving] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const viewRef = useRef({ scale: 1, x: 0, y: 0, drag: false, px: 0, py: 0 });
@@ -504,10 +515,20 @@ function StickerCreator({ onClose, onCreated, toast }: { onClose: () => void; on
   // redraw once the canvas is actually mounted (and whenever the image changes)
   useEffect(() => { draw(); }, [imgSrc]);
   const pick = (f: File) => {
+    if (f.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|3gp|m4v)$/i.test(f.name)) {
+      setIsVideo(true);
+      setImgSrc(null);
+      setVideoSrc(URL.createObjectURL(f));
+      window.__stickerFile = f;
+      return;
+    }
+    setIsVideo(false);
+    setVideoSrc(null);
     const url = URL.createObjectURL(f);
     const im = new Image();
     im.onload = () => { imgRef.current = im; viewRef.current = { scale: 1, x: 0, y: 0, drag: false, px: 0, py: 0 }; setImgSrc(url); force(n => n + 1); draw(); };
     im.src = url;
+    window.__stickerFile = f;
   };
   const draw = () => {
     const cv = canvasRef.current, im = imgRef.current;
@@ -525,27 +546,41 @@ function StickerCreator({ onClose, onCreated, toast }: { onClose: () => void; on
   const save = async () => {
     setSaving(true);
     try {
-      draw();
-      const blob: Blob | null = await new Promise(r => canvasRef.current!.toBlob(r, 'image/webp', 0.85));
-      if (!blob) throw new Error('render_failed');
-      const fd = new FormData(); fd.append('file', new File([blob], 'sticker.webp', { type: 'image/webp' }));
-      const up = await api.upload('/media/upload', fd);
-      if (!up.ids?.length) throw new Error('upload_failed');
-      const d = await api.post('/stickers/mine', { mediaUrl: up.ids[0] });
-      onCreated(up.ids[0]); toast('sticker saved');
-    } catch (e: any) { toast(e.message || 'could not save sticker'); }
+      let blob: Blob;
+      if (isVideo) {
+        blob = window.__stickerFile!;
+      } else {
+        draw();
+        const b: Blob | null = await new Promise(r => canvasRef.current!.toBlob(r, 'image/webp', 0.85));
+        if (!b) throw new Error('render_failed');
+        blob = b;
+      }
+      const fd = new FormData(); fd.append('file', new File([blob], isVideo ? 'sticker.mp4' : 'sticker.webp', { type: isVideo ? 'video/mp4' : 'image/webp' }));
+      const up = await api.upload('/stickers/create', fd);
+      if (!up.url) throw new Error(up.error || 'upload_failed');
+      onCreated(up.url); toast('sticker saved');
+    } catch (e: any) { toast(e.code === 'sticker_too_long' ? 'video stickers are 10 seconds max' : (e.message || 'could not save sticker')); }
     finally { setSaving(false); }
   };
   return (
     <div className="fixed inset-0 z-[96] bg-black/85 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-sm p-4" onClick={e => e.stopPropagation()}>
         <h3 className="text-white font-semibold mb-3">Create sticker</h3>
-        {!imgSrc ? (
+        {!imgSrc && !videoSrc ? (
           <>
-            <p className="text-neutral-400 text-xs mb-3">Pick a photo — you can position and zoom it into a square before saving.</p>
+            <p className="text-neutral-400 text-xs mb-3">Pick a photo or a video (videos are trimmed to 10 seconds max). Photos can be positioned and zoomed into a square.</p>
             <label className="block text-center bg-violet-600 hover:bg-violet-500 text-white rounded-xl py-2.5 cursor-pointer font-medium">
-              Choose photo<input type="file" hidden accept="image/*" onChange={e => { if (e.target.files![0]) pick(e.target.files![0]); e.target.value = ''; }} />
+              Choose photo or video<input type="file" hidden accept="image/*,video/*,.mp4,.mov,.webm,.mkv,.avi,.3gp" onChange={e => { if (e.target.files![0]) pick(e.target.files![0]); e.target.value = ''; }} />
             </label>
+          </>
+        ) : isVideo ? (
+          <>
+            <video src={videoSrc!} controls muted loop autoPlay playsInline className="w-full aspect-square rounded-xl bg-neutral-800 object-cover" />
+            <p className="text-neutral-500 text-xs mt-2 text-center">Videos are cropped square and trimmed to 10 seconds max.</p>
+            <div className="flex gap-2 mt-3">
+              <Btn className="flex-1" onClick={() => { setVideoSrc(null); setIsVideo(false); }} disabled={saving}>Change</Btn>
+              <Btn className="flex-1" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Make sticker'}</Btn>
+            </div>
           </>
         ) : (
           <>
@@ -558,7 +593,7 @@ function StickerCreator({ onClose, onCreated, toast }: { onClose: () => void; on
             <input type="range" min={1} max={4} step={0.05} defaultValue={1} className="w-full mt-3 accent-violet-500"
               onInput={e => { viewRef.current.scale = parseFloat((e.target as HTMLInputElement).value); draw(); }} />
             <div className="flex gap-2 mt-3">
-              <Btn className="flex-1" onClick={() => setImgSrc(null)} disabled={saving}>Change photo</Btn>
+              <Btn className="flex-1" onClick={() => { setImgSrc(null); }} disabled={saving}>Change photo</Btn>
               <Btn className="flex-1" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Make sticker'}</Btn>
             </div>
           </>

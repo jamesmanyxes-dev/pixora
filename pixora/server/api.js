@@ -911,12 +911,23 @@ api.post('/conversations/:id/messages', auth(), rateLimit('msg', 300, 60e3), wra
   if (b.kind === 'sticker') kind = 'sticker';
   if (b.mediaUrl) { mediaId = String(b.mediaUrl).split('/').pop(); kind = b.kind || 'image'; duration = b.durationMs || null; }
   const body = clean(b.body || '', 4000);
-  if (!body && !mediaId) return bad(res, 'empty_message');
-  if (kind === 'sticker' && !/^\S{1,64}$/.test(body)) return bad(res, 'empty_message');
+  if (kind === 'sticker') {
+    // sticker: either a ref in body (emoji / pack), or an uploaded image/video clip (max 10s)
+    if (!body && !mediaId) return bad(res, 'empty_message');
+    if (body && !mediaId && !/^\S{1,64}$/.test(body)) return bad(res, 'empty_message');
+    let mediaMime = null;
+    if (mediaId) {
+      const { rows: [mm] } = await q(`SELECT mime, duration_ms FROM media WHERE id=$1`, [mediaId]);
+      if (!mm) return bad(res, 'empty_message');
+      mediaMime = mm.mime;
+      if (mm.mime.startsWith('video/') && (duration || mm.duration_ms) && Math.max(duration || 0, mm.duration_ms || 0) > 10500) return bad(res, 'sticker_too_long');
+    }
+    var stickerMime = mediaMime;
+  } else if (!body && !mediaId) return bad(res, 'empty_message');
   const { rows: [m] } = await q(
     `INSERT INTO messages(conversation_id, sender_id, kind, body, media_id, duration_ms, reply_to_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
     [req.params.id, req.user.id, kind, body || null, mediaId, duration, b.replyToId || null]);
-  const payload = { id: m.id, conversationId: m.conversation_id, senderId: m.sender_id, kind, body, mediaUrl: mediaId ? `/media/${mediaId}` : null, durationMs: duration, replyToId: m.reply_to_id, createdAt: m.created_at, sender: { id: req.user.id, username: req.user.username, displayName: req.user.display_name, avatarUrl: req.user.avatar_url } };
+  const payload = { id: m.id, conversationId: m.conversation_id, senderId: m.sender_id, kind, body, mediaUrl: mediaId ? `/media/${mediaId}` : null, mediaMime: kind === 'sticker' ? stickerMime : null, durationMs: duration, replyToId: m.reply_to_id, createdAt: m.created_at, sender: { id: req.user.id, username: req.user.username, displayName: req.user.display_name, avatarUrl: req.user.avatar_url } };
   const io = req.app.get('io');
   const { rows: members } = await q(`SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id != $2`, [req.params.id, req.user.id]);
   // @mentions: notify members the message tags (WhatsApp style).
@@ -1015,7 +1026,12 @@ api.post('/messages/:id/pin', auth(), wrap(async (req, res) => {
 
 // ---------------- personal stickers ----------------
 api.get('/stickers/mine', auth(), wrap(async (req, res) => {
-  res.json({ stickers: req.user.settings?.stickers || [] });
+  const list = req.user.settings?.stickers || [];
+  // resolve mime for each ref so the client can render video stickers properly
+  const mediaRefs = list.filter(u => u.startsWith('/media/')).map(u => u.split('/').pop());
+  const { rows: media } = mediaRefs.length ? await q(`SELECT id, mime FROM media WHERE id = ANY($1)`, [mediaRefs]) : { rows: [] };
+  const mimeOf = (id) => media.find(m => m.id === id)?.mime || null;
+  res.json({ stickers: list.map(u => ({ url: u, mime: u.startsWith('/stickers/') ? 'image/webp' : mimeOf(u.split('/').pop()) })) });
 }));
 api.post('/stickers/mine', auth(), rateLimit('stickers', 20, 600e3), wrap(async (req, res) => {
   const url = clean(req.body?.mediaUrl || '', 100);
@@ -1024,13 +1040,57 @@ api.post('/stickers/mine', auth(), rateLimit('stickers', 20, 600e3), wrap(async 
   if (!isMedia && !isPack) return bad(res, 'invalid_media');
   if (isMedia) {
     const { rows: [m] } = await q(`SELECT mime FROM media WHERE id=$1`, [url.split('/').pop()]);
-    if (!m || !m.mime.startsWith('image/')) return bad(res, 'invalid_media');
+    if (!m || !(m.mime.startsWith('image/') || m.mime.startsWith('video/'))) return bad(res, 'invalid_media');
+    if (m.mime.startsWith('video/') && (m.duration_ms || 0) > 10500) return bad(res, 'sticker_too_long');
   }
   const cur = req.user.settings?.stickers || [];
   if (cur.includes(url)) return res.json({ stickers: cur });
   const list = [url, ...cur].slice(0, 30);
   await q(`UPDATE users SET settings = COALESCE(settings,'{}'::jsonb) || jsonb_build_object('stickers', $2::jsonb) WHERE id=$1`, [req.user.id, JSON.stringify(list)]);
   res.json({ stickers: list });
+}));
+// create a personal sticker from an upload: images get square-cropped, videos are
+// cropped square, shrunk and hard-trimmed to 10 seconds max
+api.post('/stickers/create', auth(), rateLimit('stickers', 20, 600e3), wrap(async (req, res) => {
+  const { files } = await saveUpload(req, res, { maxBytes: 100 * 1024 * 1024 });
+  const f = files[0];
+  if (!f) return bad(res, 'empty_upload');
+  let buf = f.buf, mime = f.mime, durationMs = null;
+  try {
+    const { execFile } = await import('child_process');
+    const fs = await import('fs');
+    const tmpIn = `/tmp/st-${Date.now()}.bin`;
+    const tmpOut = `/tmp/st-${Date.now()}.${mime.startsWith('video/') ? 'mp4' : 'webp'}`;
+    fs.writeFileSync(tmpIn, buf);
+    if (mime.startsWith('video/')) {
+      await new Promise((resolve, reject) => execFile('ffmpeg', ['-y','-loglevel','error','-i',tmpIn,'-t','10','-c:v','libx264','-preset','veryfast','-crf','30','-maxrate','800k','-bufsize','1600k','-c:a','aac','-b:a','48k','-vf','crop=min(iw\\,ih):min(iw\\,ih),scale=320:320','-movflags','+faststart',tmpOut], { timeout: 60000 }, (err) => err ? reject(err) : resolve()));
+      buf = fs.readFileSync(tmpOut); mime = 'video/mp4';
+    } else if (mime.startsWith('image/')) {
+      await new Promise((resolve, reject) => execFile('ffmpeg', ['-y','-loglevel','error','-i',tmpIn,'-vf','crop=min(iw\\,ih):min(iw\\,ih),scale=320:320','-frames:v','1',tmpOut], { timeout: 30000 }, (err) => err ? reject(err) : resolve()));
+      buf = fs.readFileSync(tmpOut); mime = 'image/webp';
+    } else { fs.unlinkSync(tmpIn); return bad(res, 'invalid_media'); }
+    buf = buf || fs.readFileSync(tmpOut);
+    // measure the result so the 10s cap is enforced consistently
+    try {
+      durationMs = await new Promise((resolve) => execFile('ffprobe', ['-v','error','-show_entries','format=duration','-of','csv=p=0',tmpOut], { timeout: 10000 }, (err, stdout) => resolve(err ? null : Math.round(parseFloat(stdout.trim()) * 1000) || null)));
+      if (durationMs && durationMs > 10500) { fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); return bad(res, 'sticker_too_long'); }
+    } catch {}
+    fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut);
+  } catch { /* keep original on any ffmpeg failure */ }
+  // video stickers must be at most 10 seconds — measure if ffmpeg couldn't trim
+  if (mime.startsWith('video/') && !durationMs) {
+    try {
+      const { execFile } = await import('child_process');
+      durationMs = await new Promise((resolve) => execFile('ffprobe', ['-v','error','-show_entries','format=duration','-of','csv=p=0','-'], { timeout: 10000 }, (err, stdout) => resolve(err ? null : Math.round(parseFloat(stdout.trim()) * 1000) || null)));
+      if (durationMs && durationMs > 10500) return bad(res, 'sticker_too_long');
+    } catch {}
+  }
+  const { rows: [m] } = await q(`INSERT INTO media(owner_id, mime, size, data, duration_ms) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [req.user.id, mime, buf.length, buf, durationMs]);
+  const url = `/media/${m.id}`;
+  const cur = req.user.settings?.stickers || [];
+  const list = cur.includes(url) ? cur : [url, ...cur].slice(0, 30);
+  await q(`UPDATE users SET settings = COALESCE(settings,'{}'::jsonb) || jsonb_build_object('stickers', $2::jsonb) WHERE id=$1`, [req.user.id, JSON.stringify(list)]);
+  res.json({ url, stickers: list });
 }));
 api.post('/stickers/mine/delete', auth(), wrap(async (req, res) => {
   const url = clean(req.body?.mediaUrl || '', 100);
@@ -1085,7 +1145,7 @@ api.get('/conversations/:id/info', auth(), wrap(async (req, res) => {
   const { rows: [mine] } = await q(`SELECT role, muted FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
   if (!mine) return bad(res, 'forbidden', 403);
   const { rows: [c] } = await q(
-    `SELECT c.id, c.is_group, c.title, c.description, c.avatar_url, c.invite_code, c.settings, c.created_by, c.created_at, c.join_requests,
+    `SELECT c.id, c.is_group, c.title, c.description, c.avatar_url AS "avatarUrl", c.invite_code, c.settings, c.created_by, c.created_at AS "createdAt", c.join_requests,
       (SELECT json_agg(json_build_object('id', u2.id, 'username', u2.username, 'displayName', u2.display_name, 'avatarUrl', u2.avatar_url, 'role', cm2.role, 'joinedAt', cm2.joined_at))
         FROM conversation_members cm2 JOIN users u2 ON u2.id=cm2.user_id WHERE cm2.conversation_id=c.id) AS members
      FROM conversations c WHERE c.id=$1`, [req.params.id]);
