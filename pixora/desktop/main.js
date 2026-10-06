@@ -1,5 +1,5 @@
 const { app, BrowserWindow, shell, nativeTheme } = require('electron');
-const APP_URL = 'https://01a0d978-a6e4-742e-a951-1b70851908b2.skydive.app';
+const APP_URL = 'https://pixora-btgo.onrender.com';
 
 function createWindow() {
   const win = new BrowserWindow({

@@ -840,7 +840,7 @@ api.get('/conversations', auth(), wrap(async (req, res) => {
     `SELECT c.id, c.is_group, c.title, c.avatar_url,
       cm.role AS my_role,
       c.description, c.invite_code,
-      (SELECT json_agg(json_build_object('id', u2.id, 'username', u2.username, 'displayName', u2.display_name, 'avatarUrl', u2.avatar_url, 'verified', u2.is_verified, 'role', cm3.role))
+      (SELECT json_agg(json_build_object('id', u2.id, 'username', u2.username, 'displayName', u2.display_name, 'avatarUrl', u2.avatar_url, 'verified', u2.is_verified, 'role', cm3.role, 'lastReadAt', cm3.last_read_at))
         FROM conversation_members cm2 JOIN users u2 ON u2.id=cm2.user_id LEFT JOIN conversation_members cm3 ON cm3.conversation_id=c.id AND cm3.user_id=u2.id WHERE cm2.conversation_id=c.id) AS members,
       (SELECT json_build_object('id', m.id, 'body', m.body, 'kind', m.kind, 'createdAt', m.created_at, 'senderId', m.sender_id)
         FROM messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message,
@@ -900,21 +900,39 @@ api.post('/conversations/:id/messages', auth(), rateLimit('msg', 300, 60e3), wra
   if (!member.rowCount) return bad(res, 'forbidden', 403);
   let mediaId = null, kind = 'text', duration = null;
   const b = req.body || {};
+  if (b.kind === 'sticker') kind = 'sticker';
   if (b.mediaUrl) { mediaId = String(b.mediaUrl).split('/').pop(); kind = b.kind || 'image'; duration = b.durationMs || null; }
   const body = clean(b.body || '', 4000);
   if (!body && !mediaId) return bad(res, 'empty_message');
+  if (kind === 'sticker' && !/^\S{1,64}$/.test(body)) return bad(res, 'empty_message');
   const { rows: [m] } = await q(
     `INSERT INTO messages(conversation_id, sender_id, kind, body, media_id, duration_ms, reply_to_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
     [req.params.id, req.user.id, kind, body || null, mediaId, duration, b.replyToId || null]);
   const payload = { id: m.id, conversationId: m.conversation_id, senderId: m.sender_id, kind, body, mediaUrl: mediaId ? `/media/${mediaId}` : null, durationMs: duration, replyToId: m.reply_to_id, createdAt: m.created_at, sender: { id: req.user.id, username: req.user.username, displayName: req.user.display_name, avatarUrl: req.user.avatar_url } };
   const io = req.app.get('io');
   const { rows: members } = await q(`SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id != $2`, [req.params.id, req.user.id]);
+  // @mentions: notify members the message tags (WhatsApp style)
+  let mentions = [];
+  if (body) {
+    const names = extractMentions(body);
+    if (names.length) {
+      const { rows: musers } = await q(`SELECT id, username FROM users WHERE username = ANY($1)`, [names]);
+      const memberIds = new Set(members.map(u => String(u.user_id)));
+      mentions = musers.filter(u => memberIds.has(String(u.id)) && String(u.id) !== String(req.user.id));
+    }
+  }
+  payload.mentions = mentions.map(u => ({ id: u.id, username: u.username }));
   for (const u of members) {
     io.to(`user:${u.user_id}`).emit('message:new', payload);
     const { rows: [prefs] } = await q(`SELECT settings FROM users WHERE id=$1`, [u.user_id]);
-    if (prefs?.settings?.notify?.messages !== false) {
+    if (mentions.some(m => String(m.id) === String(u.user_id))) {
+      await notify({ userId: u.user_id, actorId: req.user.id, type: 'mention', entityType: 'conversation', entityId: req.params.id, body: body.slice(0, 80), io });
+      sendPush(u.user_id, req.user.display_name || req.user.username, `mentioned you: ${kind === 'sticker' ? '🎨 Sticker' : body.slice(0, 60)}`,
+        { conversationId: req.params.id, senderId: String(req.user.id) });
+    } else if (prefs?.settings?.notify?.messages !== false) {
+      const pushBody = kind === 'sticker' ? (body.startsWith('/stickers/') ? '🎨 Sticker' : body) : body ? body.slice(0, 80) : (kind === 'voice' ? '🎤 Voice note' : kind === 'video' ? '🎬 Video' : '📷 Photo');
       await notify({ userId: u.user_id, actorId: req.user.id, type: 'message', entityType: 'conversation', entityId: req.params.id, body: body ? body.slice(0, 80) : (kind === 'voice' ? 'Voice note' : kind), io });
-      sendPush(u.user_id, req.user.display_name || req.user.username, body ? body.slice(0, 80) : (kind === 'voice' ? '🎤 Voice note' : kind === 'video' ? '🎬 Video' : '📷 Photo'),
+      sendPush(u.user_id, req.user.display_name || req.user.username, pushBody,
         { conversationId: req.params.id, senderId: String(req.user.id) });
     }
   }

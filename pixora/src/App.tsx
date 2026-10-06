@@ -97,7 +97,7 @@ export default function App() {
     if (!me) return;
     initPush(); // ask permission + subscribe for real device notifications
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-    const s = io({ auth: { token: getToken() } });
+    const s = io({ auth: { token: getToken() }, reconnectionDelayMax: 10000, timeout: 20000 });
     (window as any).__pixoraSocket = s;
     setSocket(s);
     s.on('notification:new', (n: any) => { setUnreadNotifs(x => x + 1); playNotifySound(); toast(`${String(n.type).replace('_', ' ')}`); });

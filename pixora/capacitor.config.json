@@ -4,7 +4,7 @@
   "webDir": "dist",
   "bundledWebRuntime": false,
   "server": {
-    "url": "https://01a0d978-a6e4-742e-a951-1b70851908b2.skydive.app",
+    "url": "https://pixora-btgo.onrender.com",
     "cleartext": false,
     "androidScheme": "https"
   },
