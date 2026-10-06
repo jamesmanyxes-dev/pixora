@@ -204,7 +204,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
     // WhatsApp-style @mention autocomplete: @ right before the caret opens the member picker
     const caret = e.target.selectionStart ?? e.target.value.length;
     const m = /@([a-zA-Z0-9_]*)$/.exec(e.target.value.slice(0, caret));
-    setMentionQuery(m && conv?.is_group ? m[1] : null);
+    setMentionQuery(m ? m[1] : null);
   };
   const mentionCandidates = mentionQuery === null ? [] : (conv?.members || [])
     .filter((u: any) => u.id !== me.id && u.username?.toLowerCase().startsWith(String(mentionQuery).toLowerCase()))
@@ -342,7 +342,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
             ))}
           </div>
         )}
-        {showStickers && <StickerPanel onPick={sendSticker} onClose={() => setShowStickers(false)} />}
+        {showStickers && <StickerPanel onPick={sendSticker} onClose={() => setShowStickers(false)} toast={toast} />}
         {uploading && <span className="absolute -top-7 left-4 text-xs text-violet-300 bg-neutral-900 rounded-full px-3 py-1">{uploading}</span>}
         <div className="flex items-center gap-2 py-3">
           <label className="text-neutral-400 cursor-pointer"><Paperclip size={20} /><input type="file" hidden accept="image/*,video/*" key={attachKey} onChange={e => { if (e.target.files![0]) sendMedia(e.target.files![0]); e.target.value = ''; }} /></label>
@@ -420,7 +420,7 @@ export const STICKER_PACK = ['smiley','love','cool','cry','angry','party','thumb
 
 function StickerBody({ ref: sref }: { ref: string }) {
   if (!sref) return null;
-  if (sref.startsWith('/stickers/')) return <img src={sref} className="w-28 h-28 object-contain" alt="sticker" />;
+  if (sref.startsWith('/')) return <img src={sref} className="w-28 h-28 object-contain" alt="sticker" />;
   return <span className="text-6xl leading-none block">{sref}</span>;
 }
 
@@ -433,27 +433,121 @@ function RenderBody({ body, members, mineMsg }: { body: string; members?: any[];
     : <span key={i}>{p}</span>)}</>;
 }
 
-function StickerPanel({ onPick, onClose }: { onPick: (ref: string) => void; onClose: () => void }) {
-  const [tab, setTab] = useState<'pack' | 'emoji'>('pack');
+function StickerPanel({ onPick, onClose, toast }: { onPick: (ref: string) => void; onClose: () => void; toast: (s: string) => void }) {
+  const [tab, setTab] = useState<'mine' | 'pack' | 'emoji'>('pack');
+  const [mine, setMine] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false);
+  useEffect(() => { api.get('/stickers/mine').then(d => setMine(d.stickers || [])).catch(() => {}); }, []);
   return (
-    <div className="absolute bottom-full left-0 right-0 mb-1 bg-neutral-900 border border-neutral-800 rounded-2xl p-3 shadow-xl z-10">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex gap-1">
-          <button onClick={() => setTab('pack')} className={`text-xs rounded-full px-3 py-1 ${tab === 'pack' ? 'bg-violet-600 text-white' : 'bg-neutral-800 text-neutral-400'}`}>Stickers</button>
-          <button onClick={() => setTab('emoji')} className={`text-xs rounded-full px-3 py-1 ${tab === 'emoji' ? 'bg-violet-600 text-white' : 'bg-neutral-800 text-neutral-400'}`}>Emoji</button>
+    <>
+      <div className="absolute bottom-full left-0 right-0 mb-1 bg-neutral-900 border border-neutral-800 rounded-2xl p-3 shadow-xl z-10">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex gap-1">
+            <button onClick={() => setTab('mine')} className={`text-xs rounded-full px-3 py-1 ${tab === 'mine' ? 'bg-violet-600 text-white' : 'bg-neutral-800 text-neutral-400'}`}>Mine</button>
+            <button onClick={() => setTab('pack')} className={`text-xs rounded-full px-3 py-1 ${tab === 'pack' ? 'bg-violet-600 text-white' : 'bg-neutral-800 text-neutral-400'}`}>Stickers</button>
+            <button onClick={() => setTab('emoji')} className={`text-xs rounded-full px-3 py-1 ${tab === 'emoji' ? 'bg-violet-600 text-white' : 'bg-neutral-800 text-neutral-400'}`}>Emoji</button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setCreating(true)} className="bg-violet-600 hover:bg-violet-500 text-white text-xs rounded-full px-3 py-1 font-medium" title="Create a sticker from a photo">+ Create</button>
+            <button onClick={onClose} className="text-neutral-500 hover:text-white"><X size={16} /></button>
+          </div>
         </div>
-        <button onClick={onClose} className="text-neutral-500 hover:text-white"><X size={16} /></button>
-      </div>
-      <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-56 overflow-y-auto">
-        {tab === 'pack'
-          ? STICKER_PACK.map(s => (
+        <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-56 overflow-y-auto">
+          {tab === 'mine' && (mine.length
+            ? mine.map(s => (
+              <button key={s} onClick={() => onPick(s)}
+                onContextMenu={e => e.preventDefault()}
+                onPointerDown={e => { const t = e.currentTarget as HTMLElement; const to = setTimeout(async () => { if (confirm('Remove this sticker?')) { const d = await api.post('/stickers/mine/delete', { mediaUrl: s }); setMine(d.stickers || []); } }, 600); const clear = () => { clearTimeout(to); t.removeEventListener('pointerup', clear); t.removeEventListener('pointerleave', clear); }; t.addEventListener('pointerup', clear); t.addEventListener('pointerleave', clear); }}
+                className="hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition">
+                <img src={s} className="w-full aspect-square object-contain" alt="sticker" loading="lazy" />
+              </button>
+            ))
+            : <p className="col-span-full text-center text-neutral-500 text-xs py-8">No personal stickers yet — tap + Create to make one from any photo</p>)}
+          {tab === 'pack' && STICKER_PACK.map(s => (
             <button key={s} onClick={() => onPick(`/stickers/${s}.webp`)} className="hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition">
               <img src={`/stickers/${s}.webp`} className="w-full aspect-square object-contain" alt={s} loading="lazy" />
             </button>
-          ))
-          : STICKER_EMOJI.map(e => (
+          ))}
+          {tab === 'emoji' && STICKER_EMOJI.map(e => (
             <button key={e} onClick={() => onPick(e)} className="text-4xl hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition">{e}</button>
           ))}
+        </div>
+      </div>
+      {creating && <StickerCreator onClose={() => setCreating(false)} onCreated={(url: string) => { setMine(m => [url, ...m].slice(0, 30)); setCreating(false); setTab('mine'); }} toast={toast} />}
+    </>
+  );
+}
+
+// WhatsApp-style sticker maker: pick a photo, pan/zoom inside a square, save as a personal sticker
+function StickerCreator({ onClose, onCreated, toast }: { onClose: () => void; onCreated: (url: string) => void; toast: (s: string) => void }) {
+  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const viewRef = useRef({ scale: 1, x: 0, y: 0, drag: false, px: 0, py: 0 });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [, force] = useState(0);
+  // redraw once the canvas is actually mounted (and whenever the image changes)
+  useEffect(() => { draw(); }, [imgSrc]);
+  const pick = (f: File) => {
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => { imgRef.current = im; viewRef.current = { scale: 1, x: 0, y: 0, drag: false, px: 0, py: 0 }; setImgSrc(url); force(n => n + 1); draw(); };
+    im.src = url;
+  };
+  const draw = () => {
+    const cv = canvasRef.current, im = imgRef.current;
+    if (!cv || !im) return;
+    const ctx = cv.getContext('2d')!;
+    const v = viewRef.current;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    // base cover-fit into the square, then apply user zoom + pan
+    const base = Math.max(cv.width / im.width, cv.height / im.height);
+    const s = base * v.scale;
+    const w = im.width * s, h = im.height * s;
+    const cx = cv.width / 2 + v.x, cy = cv.height / 2 + v.y;
+    ctx.drawImage(im, cx - w / 2, cy - h / 2, w, h);
+  };
+  const save = async () => {
+    setSaving(true);
+    try {
+      draw();
+      const blob: Blob | null = await new Promise(r => canvasRef.current!.toBlob(r, 'image/webp', 0.85));
+      if (!blob) throw new Error('render_failed');
+      const fd = new FormData(); fd.append('file', new File([blob], 'sticker.webp', { type: 'image/webp' }));
+      const up = await api.upload('/media/upload', fd);
+      if (!up.ids?.length) throw new Error('upload_failed');
+      const d = await api.post('/stickers/mine', { mediaUrl: up.ids[0] });
+      onCreated(up.ids[0]); toast('sticker saved');
+    } catch (e: any) { toast(e.message || 'could not save sticker'); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-[96] bg-black/85 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-sm p-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-white font-semibold mb-3">Create sticker</h3>
+        {!imgSrc ? (
+          <>
+            <p className="text-neutral-400 text-xs mb-3">Pick a photo — you can position and zoom it into a square before saving.</p>
+            <label className="block text-center bg-violet-600 hover:bg-violet-500 text-white rounded-xl py-2.5 cursor-pointer font-medium">
+              Choose photo<input type="file" hidden accept="image/*" onChange={e => { if (e.target.files![0]) pick(e.target.files![0]); e.target.value = ''; }} />
+            </label>
+          </>
+        ) : (
+          <>
+            <canvas ref={canvasRef} width={512} height={512}
+              className="w-full aspect-square rounded-xl bg-neutral-800 touch-none cursor-move"
+              onPointerDown={e => { const v = viewRef.current; v.drag = true; v.px = e.clientX; v.py = e.clientY; (e.target as HTMLElement).setPointerCapture(e.pointerId); }}
+              onPointerMove={e => { const v = viewRef.current; if (!v.drag) return; v.x += e.clientX - v.px; v.y += e.clientY - v.py; v.px = e.clientX; v.py = e.clientY; draw(); }}
+              onPointerUp={() => { viewRef.current.drag = false; }}
+            />
+            <input type="range" min={1} max={4} step={0.05} defaultValue={1} className="w-full mt-3 accent-violet-500"
+              onInput={e => { viewRef.current.scale = parseFloat((e.target as HTMLInputElement).value); draw(); }} />
+            <div className="flex gap-2 mt-3">
+              <Btn className="flex-1" onClick={() => setImgSrc(null)} disabled={saving}>Change photo</Btn>
+              <Btn className="flex-1" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Make sticker'}</Btn>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -991,6 +991,29 @@ api.post('/messages/:id/pin', auth(), wrap(async (req, res) => {
   res.json({ pinned: pin });
 }));
 
+// ---------------- personal stickers ----------------
+api.get('/stickers/mine', auth(), wrap(async (req, res) => {
+  res.json({ stickers: req.user.settings?.stickers || [] });
+}));
+api.post('/stickers/mine', auth(), rateLimit('stickers', 20, 600e3), wrap(async (req, res) => {
+  const url = clean(req.body?.mediaUrl || '', 100);
+  if (!/^\/media\/[A-Za-z0-9_-]{1,64}$/.test(url)) return bad(res, 'invalid_media');
+  const { rows: [m] } = await q(`SELECT mime FROM media WHERE id=$1`, [url.split('/').pop()]);
+  if (!m || !m.mime.startsWith('image/')) return bad(res, 'invalid_media');
+  const cur = req.user.settings?.stickers || [];
+  if (cur.includes(url)) return res.json({ stickers: cur });
+  const list = [url, ...cur].slice(0, 30);
+  await q(`UPDATE users SET settings = COALESCE(settings,'{}'::jsonb) || jsonb_build_object('stickers', $2::jsonb) WHERE id=$1`, [req.user.id, JSON.stringify(list)]);
+  res.json({ stickers: list });
+}));
+api.post('/stickers/mine/delete', auth(), wrap(async (req, res) => {
+  const url = clean(req.body?.mediaUrl || '', 100);
+  const cur = req.user.settings?.stickers || [];
+  const list = cur.filter(u => u !== url);
+  await q(`UPDATE users SET settings = COALESCE(settings,'{}'::jsonb) || jsonb_build_object('stickers', $2::jsonb) WHERE id=$1`, [req.user.id, JSON.stringify(list)]);
+  res.json({ stickers: list });
+}));
+
 api.post('/messages/:id/forward', auth(), rateLimit('msg', 300, 60e3), wrap(async (req, res) => {
   const { conversationIds } = req.body || {};
   if (!Array.isArray(conversationIds) || !conversationIds.length) return bad(res, 'no_targets');
