@@ -213,8 +213,9 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
     setMentionQuery(m ? m[1] : null);
   };
   const mentionCandidates = mentionQuery === null ? [] : [
-    ...(conv?.is_group && /^(all|eve)/i.test(String(mentionQuery)) ? [{ id: 'everyone', username: 'all', displayName: 'everyone', __everyone: true }] : []),
-    ...(conv?.members || []).filter((u: any) => u.id !== me.id && u.username?.toLowerCase().startsWith(String(mentionQuery).toLowerCase())).slice(0, 6),
+    // WhatsApp shows the full member list the moment you type @ — @all/everyone pinned on top in groups
+    ...(conv?.is_group ? [{ id: 'everyone', username: 'all', displayName: 'everyone', __everyone: true }] : []),
+    ...(conv?.members || []).filter((u: any) => u.id !== me.id && (!mentionQuery || u.username?.toLowerCase().includes(String(mentionQuery).toLowerCase()))).slice(0, 8),
   ];
   const pickMention = (u: any) => {
     setText(t => t.replace(/@[a-zA-Z0-9_]*$/, u.__everyone ? '@all ' : `@${u.username} `));
@@ -275,7 +276,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
           <button className="text-neutral-400 hover:text-white p-2" title="Video call" onClick={() => onCall?.(other.username, 'video')}><Video size={18} /></button>
         </div>}
       </div>
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-2">
         {messages.map(m => {
           const mineMsg = m.senderId === me.id;
           const isSticker = m.kind === 'sticker';
@@ -291,9 +292,9 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
                   : isSticker ? <StickerBody ref={m.body} mediaMime={m.mediaMime} />
                   : m.kind === 'voice' ? <VoiceNote src={m.mediaUrl!} mineMsg={mineMsg} />
                     : m.kind !== 'text' ? (m.kind === 'video'
-                        ? <video src={m.mediaUrl} controls onClick={() => setViewer({ url: m.mediaUrl!, kind: 'video' })} className="rounded-xl max-h-64 cursor-pointer" />
-                        : <img src={m.mediaUrl} onClick={() => setViewer({ url: m.mediaUrl!, kind: 'image' })} className="rounded-xl max-h-64 cursor-pointer" alt="attachment" />)
-                      : <span className="text-sm whitespace-pre-wrap break-words"><RenderBody body={m.body} members={conv?.members} mineMsg={mineMsg} />{m.edited && <span className="text-[10px] opacity-60 ml-1">(edited)</span>}</span>}
+                        ? <video src={m.mediaUrl} controls onClick={() => setViewer({ url: m.mediaUrl!, kind: 'video' })} className="rounded-xl max-h-64 max-w-full cursor-pointer" />
+                        : <img src={m.mediaUrl} onClick={() => setViewer({ url: m.mediaUrl!, kind: 'image' })} className="rounded-xl max-h-64 max-w-full cursor-pointer" alt="attachment" />)
+                      : <span className="text-sm whitespace-pre-wrap break-words break-all"><RenderBody body={m.body} members={conv?.members} mineMsg={mineMsg} />{m.edited && <span className="text-[10px] opacity-60 ml-1">(edited)</span>}</span>}
                 <div className={`text-[10px] mt-1 flex items-center gap-1 justify-end ${mineMsg ? 'text-violet-200' : 'text-neutral-500'}`}>
                   {m.starred && <span>★</span>}
                   {timeAgo(m.createdAt)}
@@ -433,10 +434,13 @@ export const STICKER_PACK = ['smiley','love','cool','cry','angry','party','thumb
 function StickerBody({ ref: sref, mediaMime }: { ref: string; mediaMime?: string | null }) {
   if (!sref) return null;
   if (sref.startsWith('/media/')) {
-    if (mediaMime?.startsWith('video/')) return <video src={sref} autoPlay loop muted playsInline className="w-32 h-32 object-cover rounded-xl" />;
-    return <img src={sref} className="w-28 h-28 object-contain" alt="sticker" />;
+    if (mediaMime?.startsWith('video/')) return <video src={sref} autoPlay loop muted playsInline className="w-32 h-32 object-cover rounded-xl max-w-full" />;
+    return <img src={sref} className="w-28 h-28 object-contain max-w-full" alt="sticker" />;
   }
-  return <span className="text-6xl leading-none block">{sref}</span>;
+  if (sref.startsWith('/stickers/')) return <img src={sref} className="w-28 h-28 object-contain max-w-full" alt="sticker" />;
+  // emoji sticker — only for genuinely short refs; anything else renders as safe wrapped text
+  if (sref.length <= 8) return <span className="text-6xl leading-none block">{sref}</span>;
+  return <span className="text-sm break-all whitespace-pre-wrap">{sref}</span>;
 }
 
 function RenderBody({ body, members, mineMsg }: { body: string; members?: any[]; mineMsg: boolean }) {
