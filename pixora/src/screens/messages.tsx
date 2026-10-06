@@ -289,7 +289,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
                 {m.forwarded && <div className="text-[10px] opacity-70 mb-0.5">↪ Forwarded</div>}
                 {m.pinned && <div className="text-[10px] opacity-70 mb-0.5">📌 Pinned</div>}
                 {m.deleted ? <span className="italic opacity-70 text-sm">deleted</span>
-                  : isSticker ? <StickerBody ref={m.body} mediaMime={m.mediaMime} />
+                  : isSticker ? <StickerBody ref={m.body || m.mediaUrl} mediaMime={m.mediaMime} />
                   : m.kind === 'voice' ? <VoiceNote src={m.mediaUrl!} mineMsg={mineMsg} />
                     : m.kind !== 'text' ? (m.kind === 'video'
                         ? <video src={m.mediaUrl} controls onClick={() => setViewer({ url: m.mediaUrl!, kind: 'video' })} className="rounded-xl max-h-64 max-w-full cursor-pointer" />

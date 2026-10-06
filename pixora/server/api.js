@@ -877,18 +877,18 @@ api.get('/conversations/:id/messages', auth(), wrap(async (req, res) => {
   if (!member.rowCount) return bad(res, 'forbidden', 403);
   const cur = req.query.cursor ? ` AND m.created_at < '${new Date(req.query.cursor).toISOString()}'` : '';
   const { rows } = await q(
-    `SELECT m.id, m.sender_id, m.reply_to_id, m.kind, m.body, m.media_id, m.duration_ms, m.created_at, m.deleted_at, m.starred, m.pinned_at, m.forwarded_from,
+    `SELECT m.id, m.sender_id, m.reply_to_id, m.kind, m.body, m.media_id, m.duration_ms, m.created_at, m.deleted_at, m.starred, m.pinned_at, m.forwarded_from, mm.mime AS media_mime,
       ${USER_CARD.replace(/u\./g, 'su.')},
       (SELECT json_agg(json_build_object('emoji', mr.emoji, 'users', json_build_object('id', ru.id, 'username', ru.username)))
         FROM message_reactions mr JOIN users ru ON ru.id=mr.user_id WHERE mr.message_id=m.id) AS reactions
-     FROM messages m JOIN users su ON su.id=m.sender_id WHERE m.conversation_id=$1
+     FROM messages m JOIN users su ON su.id=m.sender_id LEFT JOIN media mm ON mm.id=m.media_id WHERE m.conversation_id=$1
        AND ($2::uuid IS NULL OR NOT ($2::uuid = ANY(COALESCE(m.deleted_for, '{}'))))${cur}
      ORDER BY m.created_at DESC LIMIT 30`, [req.params.id, req.user.id]);
   await q(`UPDATE conversation_members SET last_read_at=now() WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
   res.json({
     messages: rows.map(r => ({
       id: r.id, senderId: r.sender_id, replyToId: r.reply_to_id, kind: r.kind, body: r.deleted_at ? null : r.body,
-      mediaUrl: r.media_id ? `/media/${r.media_id}` : null, durationMs: r.duration_ms, createdAt: r.created_at, deleted: !!r.deleted_at,
+      mediaUrl: r.media_id ? `/media/${r.media_id}` : null, mediaMime: r.media_mime || null, durationMs: r.duration_ms, createdAt: r.created_at, deleted: !!r.deleted_at,
       starred: r.starred, pinned: !!r.pinned_at, forwarded: !!r.forwarded_from,
       reactions: (r.reactions || []).map(x => ({ emoji: x.emoji, users: [x.users] })),
       sender: { id: r.aid, username: r.username, displayName: r.display_name, avatarUrl: r.avatar_url },
