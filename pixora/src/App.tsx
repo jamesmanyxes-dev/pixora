@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { Home, Compass, Film, Send, User as UserIcon, Plus, Radio, Settings as Cog, Phone, PhoneIncoming, Search, Shield, LayoutDashboard } from 'lucide-react';
+import { Home, Compass, Film, Send, User as UserIcon, Plus, Radio, Settings as Cog, Phone, PhoneIncoming, Search, Shield, LayoutDashboard, Users } from 'lucide-react';
 import { api, getToken, setTokens } from './api';
 import { Avatar, Spinner, Modal, Btn, Input } from './ui';
 import { t } from './i18n';
@@ -209,6 +209,10 @@ export default function App() {
   ] as const;
 
   let screen: React.ReactNode;
+  // invite-link landing: #/join/<code> — join the group, then jump into it
+  if (route.name === 'join' && route.param) {
+    return <JoinGroup code={route.param} me={me} socket={socket} onDone={(id: string) => { window.location.hash = `#/messages/${id}`; setRoute({ name: 'messages', param: id }); }} />;
+  }
   switch (route.name) {
     case 'home': screen = <>
       <StoriesBar me={me} groups={groups} onAdd={() => setStoryUpload(true)} onOpen={(i) => setStoryOpen(i)} />
@@ -430,4 +434,26 @@ function SharePanel({ post, me, onClose, toast }: any) {
     })}
     {!list.length && <p className="text-neutral-500 text-sm text-center py-4">No conversations yet</p>}
   </div>;
+}
+
+function JoinGroup({ code, me, socket, onDone }: any) {
+  const [state, setState] = useState<'joining' | 'pending' | 'error'>('joining');
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    api.post(`/conversations/join/${code}`)
+      .then(d => {
+        if (d.pendingApproval) { setState('pending'); setMsg('Your request was sent to the group admins. You will see the group in your chats once they approve you.'); }
+        else onDone(d.conversationId);
+      })
+      .catch((e: any) => { setState('error'); setMsg(e.code === 'invalid_link' ? 'This invite link is invalid or expired.' : e.code === 'banned_from_group' ? 'You were removed from this group and cannot rejoin.' : 'Could not join — try again.'); });
+  }, [code]);
+  return (
+    <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center p-6 text-center">
+      <div className="w-16 h-16 rounded-full bg-violet-600 flex items-center justify-center mb-4"><Users size={28} className="text-white" /></div>
+      {state === 'joining' && <><p className="text-white font-semibold">Joining group…</p><div className="mt-4"><Spinner /></div></>}
+      {state === 'pending' && <p className="text-white max-w-sm">{msg}</p>}
+      {state === 'error' && <p className="text-red-400 max-w-sm">{msg}</p>}
+      {state !== 'joining' && <button onClick={() => { window.location.hash = '#/messages'; window.location.reload(); }} className="mt-6 text-violet-400 text-sm">Go to chats</button>}
+    </div>
+  );
 }

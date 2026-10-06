@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Send, Paperclip, Mic, Square, ArrowLeft, Phone, Video, Users, Plus, X, Check, CheckCheck, Pencil, Trash2, Flag, Sticker } from 'lucide-react';
+import { Send, Paperclip, Mic, Square, ArrowLeft, Phone, Video, Users, Plus, X, Check, CheckCheck, Pencil, Trash2, Flag, Sticker, Shield, UserMinus, Ban, MicOff } from 'lucide-react';
 import { TypingDots } from '../components/anim';
 import { api } from '../api';
 import { Avatar, Btn, Input, Modal, Spinner, timeAgo } from '../ui';
@@ -63,7 +63,10 @@ export function Messages({ me, socket, onProfile, toast, onCall, deepParam }: { 
     if (!socket) return;
     const rc = () => loadConvs();
     socket.on('connect', rc);
-    return () => socket.off('connect', rc);
+    socket.on('conversation:new', rc);
+    socket.on('conversation:updated', rc);
+    socket.on('conversation:join_request', rc);
+    return () => { socket.off('connect', rc); socket.off('conversation:new', rc); socket.off('conversation:updated', rc); socket.off('conversation:join_request', rc); };
   }, [socket]);
   const other = (c: any) => c.members?.find((m: any) => m.id !== me.id);
   if (active) return <ChatView convId={active} me={me} socket={socket} onBack={() => setActive(null)} onProfile={onProfile} toast={toast} onCall={onCall} />;
@@ -154,6 +157,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
     if (lastRead) setReadAt(lastRead);
     await api.post(`/conversations/${convId}/read`);
   };
+  const [showInfo, setShowInfo] = useState(false);
   useEffect(() => { load(); socket?.emit('conversation:join', convId); }, [convId]);
   useEffect(() => {
     const h = (m: any) => { if (m.conversationId === convId) { setMessages(ms => ms.some(x => x.id === m.id) ? ms : [...ms, m]); api.post(`/conversations/${convId}/read`); } };
@@ -206,16 +210,19 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
     const m = /@([a-zA-Z0-9_]*)$/.exec(e.target.value.slice(0, caret));
     setMentionQuery(m ? m[1] : null);
   };
-  const mentionCandidates = mentionQuery === null ? [] : (conv?.members || [])
-    .filter((u: any) => u.id !== me.id && u.username?.toLowerCase().startsWith(String(mentionQuery).toLowerCase()))
-    .slice(0, 6);
+  const mentionCandidates = mentionQuery === null ? [] : [
+    ...(conv?.is_group && /^(all|eve)/i.test(String(mentionQuery)) ? [{ id: 'everyone', username: 'all', displayName: 'everyone', __everyone: true }] : []),
+    ...(conv?.members || []).filter((u: any) => u.id !== me.id && u.username?.toLowerCase().startsWith(String(mentionQuery).toLowerCase())).slice(0, 6),
+  ];
   const pickMention = (u: any) => {
-    setText(t => t.replace(/@[a-zA-Z0-9_]*$/, `@${u.username} `));
+    setText(t => t.replace(/@[a-zA-Z0-9_]*$/, u.__everyone ? '@all ' : `@${u.username} `));
     setMentionQuery(null);
   };
   const [uploading, setUploading] = useState<string | null>(null); // label of what's uploading
   const sendMedia = async (file: File) => {
-    const kind = file.type.startsWith('video') ? 'video' : 'image';
+    // some Android pickers give an empty MIME — fall back to the extension
+    const isVideo = file.type.startsWith('video') || /\.(mp4|mov|webm|mkv|avi|3gp|m4v)$/i.test(file.name);
+    const kind = isVideo ? 'video' : 'image';
     setUploading(kind === 'video' ? 'Sending video…' : 'Sending photo…');
     setAttachKey(k => k + 1);
     try {
@@ -252,13 +259,14 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
   };
   return (
     <div className="flex flex-col h-[calc(100vh-60px)] pb-[60px] sm:pb-0">
-      <div className="flex items-center gap-3 p-3 border-b border-neutral-900">
-        <button onClick={onBack} className="text-white sm:hidden"><ArrowLeft size={20} /></button>
-        {conv?.is_group ? <div className="w-9 h-9 rounded-full bg-neutral-800 flex items-center justify-center"><Users size={16} className="text-neutral-400" /></div>
+      <div className="flex items-center gap-3 p-3 border-b border-neutral-900 cursor-pointer" onClick={() => conv?.is_group && setShowInfo(true)}>
+        <button onClick={(e) => { e.stopPropagation(); onBack(); }} className="text-white sm:hidden"><ArrowLeft size={20} /></button>
+        {conv?.is_group
+          ? (conv?.avatarUrl ? <Avatar src={conv.avatarUrl} size={36} /> : <div className="w-9 h-9 rounded-full bg-neutral-800 flex items-center justify-center"><Users size={16} className="text-neutral-400" /></div>)
           : <Avatar src={other?.avatarUrl} size={36} />}
-        <div className="flex-1">
-          <div className="text-white text-sm font-semibold">{conv?.is_group ? conv?.title || 'Group' : other?.username}</div>
-          {typing ? <div className="text-violet-400 text-xs">{typing} {t('typing')}</div> : <div className="text-neutral-500 text-xs">{conv?.is_group ? `${conv?.members?.length} members` : ''}</div>}
+        <div className="flex-1 min-w-0">
+          <div className="text-white text-sm font-semibold truncate">{conv?.is_group ? conv?.title || 'Group' : other?.username}</div>
+          {typing ? <div className="text-violet-400 text-xs">{typing} {t('typing')}</div> : <div className="text-neutral-500 text-xs truncate">{conv?.is_group ? `${conv?.members?.length} members · tap for group info` : (conv?.description || '')}</div>}
         </div>
         {!conv?.is_group && other && <div className="ml-auto flex gap-1">
           <button className="text-neutral-400 hover:text-white p-2" title="Voice call" onClick={() => onCall?.(other.username, 'audio')}><Phone size={18} /></button>
@@ -342,10 +350,10 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
             ))}
           </div>
         )}
-        {showStickers && <StickerPanel onPick={sendSticker} onClose={() => setShowStickers(false)} toast={toast} />}
+        {showStickers && <StickerPanel onPick={sendSticker} onClose={() => setShowStickers(false)} toast={toast} onFavorite={async (ref: string) => { await api.post('/stickers/mine', { mediaUrl: ref }); toast('added to favorites'); }} />}
         {uploading && <span className="absolute -top-7 left-4 text-xs text-violet-300 bg-neutral-900 rounded-full px-3 py-1">{uploading}</span>}
         <div className="flex items-center gap-2 py-3">
-          <label className="text-neutral-400 cursor-pointer"><Paperclip size={20} /><input type="file" hidden accept="image/*,video/*" key={attachKey} onChange={e => { if (e.target.files![0]) sendMedia(e.target.files![0]); e.target.value = ''; }} /></label>
+          <label className="text-neutral-400 cursor-pointer"><Paperclip size={20} /><input type="file" hidden accept="image/*,video/*,video/mp4,video/webm,video/quicktime,.mp4,.mov,.webm,.mkv,.avi,.3gp" key={attachKey} onChange={e => { if (e.target.files![0]) sendMedia(e.target.files![0]); e.target.value = ''; }} /></label>
           {recording
             ? <button onClick={() => { recording.stop(); setRecording(null); }} className="text-red-400 animate-pulse"><Square size={20} /></button>
             : <button onClick={startRec} className="text-neutral-400 hover:text-white"><Mic size={20} /></button>}
@@ -366,6 +374,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
             setActionMsg(null);
           }}
           onReply={() => { setReplyTo(actionMsg); setActionMsg(null); }}
+          onFavorite={async () => { await api.post('/stickers/mine', { mediaUrl: actionMsg.body }); toast('added to favorites'); setActionMsg(null); }}
           onForward={() => { setFwdOpen(actionMsg); setActionMsg(null); }}
           onStar={async () => { const d = await api.post(`/messages/${actionMsg.id}/star`); setMessages(ms => ms.map(x => x.id === actionMsg.id ? { ...x, starred: d.starred } : x)); setActionMsg(null); }}
           onPin={async () => { const d = await api.post(`/messages/${actionMsg.id}/pin`); setMessages(ms => ms.map(x => x.id === actionMsg.id ? { ...x, pinned: d.pinned } : x)); setActionMsg(null); }}
@@ -384,6 +393,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
         />
       )}
       {fwdOpen && <ForwardPicker msgId={fwdOpen.id} excludeConvId={convId} onClose={() => setFwdOpen(null)} toast={toast} />}
+      {showInfo && conv?.is_group && <GroupInfo convId={convId} me={me} socket={socket} toast={toast} onClose={() => setShowInfo(false)} onRefresh={load} onProfile={onProfile} onLeft={() => { setShowInfo(false); onBack(); }} />}
       {viewer && (
         <div className="fixed inset-0 z-[90] bg-black/95 flex flex-col items-center justify-center" onClick={() => setViewer(null)}>
           <div className="absolute top-4 right-4 flex gap-2" onClick={e => e.stopPropagation()}>
@@ -428,12 +438,14 @@ function RenderBody({ body, members, mineMsg }: { body: string; members?: any[];
   if (!body) return null;
   const names = new Set((members || []).map((u: any) => String(u.username || '').toLowerCase()).filter(Boolean));
   const parts = body.split(/(@[a-zA-Z0-9._]{3,30})/g);
-  return <>{parts.map((p, i) => p.startsWith('@') && names.has(p.slice(1).toLowerCase())
+  return <>{parts.map((p, i) => (p.toLowerCase() === '@all' || p.toLowerCase() === '@everyone')
+    ? <span key={i} className={`font-semibold rounded px-0.5 ${mineMsg ? 'bg-violet-500/50 text-white' : 'bg-violet-600/50 text-violet-100'}`}>{p}</span>
+    : p.startsWith('@') && names.has(p.slice(1).toLowerCase())
     ? <span key={i} className={`font-semibold rounded px-0.5 ${mineMsg ? 'bg-violet-500/50 text-white' : 'bg-violet-600/50 text-violet-100'}`}>{p}</span>
     : <span key={i}>{p}</span>)}</>;
 }
 
-function StickerPanel({ onPick, onClose, toast }: { onPick: (ref: string) => void; onClose: () => void; toast: (s: string) => void }) {
+function StickerPanel({ onPick, onClose, toast, onFavorite }: { onPick: (ref: string) => void; onClose: () => void; toast: (s: string) => void; onFavorite: (ref: string) => void }) {
   const [tab, setTab] = useState<'mine' | 'pack' | 'emoji'>('pack');
   const [mine, setMine] = useState<string[]>([]);
   const [creating, setCreating] = useState(false);
@@ -464,7 +476,10 @@ function StickerPanel({ onPick, onClose, toast }: { onPick: (ref: string) => voi
             ))
             : <p className="col-span-full text-center text-neutral-500 text-xs py-8">No personal stickers yet — tap + Create to make one from any photo</p>)}
           {tab === 'pack' && STICKER_PACK.map(s => (
-            <button key={s} onClick={() => onPick(`/stickers/${s}.webp`)} className="hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition">
+            <button key={s} onClick={() => onPick(`/stickers/${s}.webp`)}
+              onContextMenu={e => { e.preventDefault(); onFavorite(`/stickers/${s}.webp`); }}
+              onPointerDown={e => { const t = e.currentTarget as HTMLElement; const to = setTimeout(() => onFavorite(`/stickers/${s}.webp`), 600); const clear = () => { clearTimeout(to); t.removeEventListener('pointerup', clear); t.removeEventListener('pointerleave', clear); }; t.addEventListener('pointerup', clear); t.addEventListener('pointerleave', clear); }}
+              className="hover:bg-neutral-800 rounded-xl p-1 active:scale-95 transition" title="Tap to send · hold to favorite">
               <img src={`/stickers/${s}.webp`} className="w-full aspect-square object-contain" alt={s} loading="lazy" />
             </button>
           ))}
@@ -553,7 +568,7 @@ function StickerCreator({ onClose, onCreated, toast }: { onClose: () => void; on
   );
 }
 
-function MessageActionSheet({ m, mineMsg, conv, onClose, onReact, onReply, onForward, onStar, onPin, onEdit, onDeleteMe, onDeleteAll, onReport }: any) {
+function MessageActionSheet({ m, mineMsg, conv, onClose, onReact, onReply, onFavorite, onForward, onStar, onPin, onEdit, onDeleteMe, onDeleteAll, onReport }: any) {
   return (
     <div className="fixed inset-0 z-[95] bg-black/70 flex items-end sm:items-center justify-center" onClick={onClose}>
       <div className="bg-neutral-900 border border-neutral-800 rounded-t-3xl sm:rounded-3xl w-full sm:max-w-sm p-4 animate-[fadein_.18s_ease-out]" onClick={e => e.stopPropagation()}>
@@ -564,6 +579,7 @@ function MessageActionSheet({ m, mineMsg, conv, onClose, onReact, onReply, onFor
         </div>
         <div className="space-y-0.5 text-sm">
           <SheetBtn icon="↩" label="Reply" onClick={onReply} />
+          {m.kind === 'sticker' && <SheetBtn icon="⭐" label="Add to favorites" onClick={onFavorite} />}
           <SheetBtn icon="↪" label="Forward" onClick={onForward} />
           <SheetBtn icon="★" label={m.starred ? 'Unstar' : 'Star'} onClick={onStar} />
           <SheetBtn icon="📌" label={m.pinned ? 'Unpin' : 'Pin'} onClick={onPin} />
@@ -581,6 +597,198 @@ function SheetBtn({ icon, label, onClick, danger }: any) {
     <button onClick={onClick} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-neutral-800 text-left ${danger ? 'text-red-400' : 'text-white'}`}>
       <span className="w-5 text-center">{icon}</span>{label}
     </button>
+  );
+}
+
+// WhatsApp-style group info & settings screen
+function GroupInfo({ convId, me, socket, toast, onClose, onRefresh, onProfile, onLeft }: any) {
+  const [info, setInfo] = useState<any>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState('');
+  const [desc, setDesc] = useState('');
+  const [saving, setSaving] = useState(false);
+  const load = () => api.get(`/conversations/${convId}/info`).then(d => { setInfo(d); setTitle(d.conversation.title || ''); setDesc(d.conversation.description || ''); }).catch(() => {});
+  useEffect(() => { load(); }, [convId]);
+  useEffect(() => {
+    const h = () => load();
+    socket?.on('conversation:updated', h);
+    return () => socket?.off('conversation:updated', h);
+  }, [convId, socket]);
+  if (!info) return <div className="fixed inset-0 z-[92] bg-neutral-950 flex items-center justify-center" onClick={onClose}><Spinner /></div>;
+  const c = info.conversation;
+  const myRole = info.myRole;
+  const isAdmin = info.isAdmin;
+  const isOwner = myRole === 'owner';
+  const save = async () => {
+    setSaving(true);
+    try { await api.post(`/conversations/${convId}/settings`, { title, description: desc }); await load(); setEditing(false); onRefresh?.(); toast('group updated'); }
+    catch (e: any) { toast(e.message || 'failed'); }
+    finally { setSaving(false); }
+  };
+  const pickAvatar = async (f: File) => {
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const up = await api.upload('/media/upload', fd);
+      if (!up.ids?.length) throw new Error('upload_failed');
+      await api.post(`/conversations/${convId}/settings`, { avatarUrl: up.ids[0] });
+      await load(); onRefresh?.(); toast('photo updated');
+    } catch (e: any) { toast(e.message || 'failed'); }
+  };
+  const memberAction = async (u: any, action: string) => {
+    try {
+      if (action === 'role') await api.post(`/conversations/${convId}/members/${u.id}/role`, { role: u.role === 'member' ? 'admin' : 'member' });
+      if (action === 'kick') await api.post(`/conversations/${convId}/members/${u.id}/kick`);
+      if (action === 'ban') await api.post(`/conversations/${convId}/members/${u.id}/ban`);
+      if (action === 'mute') await api.post(`/conversations/${convId}/members/${u.id}/mute`);
+      await load(); onRefresh?.();
+    } catch (e: any) { toast(e.message || 'failed'); }
+  };
+  const toggle = async (key: string, val: boolean) => {
+    setInfo((s: any) => ({ ...s, conversation: { ...s.conversation, settings: { ...s.conversation.settings, [key]: val } } }));
+    try { await api.post(`/conversations/${convId}/settings`, { [key]: val }); } catch { toast('failed'); load(); }
+  };
+  const leave = async () => {
+    if (!confirm('Leave this group?')) return;
+    await api.post(`/conversations/${convId}/leave`);
+    onLeft();
+  };
+  const inviteUrl = c.invite_code ? `${location.origin}/#/join/${c.invite_code}` : null;
+  return (
+    <div className="fixed inset-0 z-[92] bg-neutral-950 overflow-y-auto" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} className="min-h-full">
+        <div className="sticky top-0 bg-neutral-950/95 backdrop-blur p-3 flex items-center gap-3 border-b border-neutral-900 z-10">
+          <button onClick={onClose} className="text-white"><X size={20} /></button>
+          <span className="text-white font-semibold">Group info</span>
+        </div>
+        <div className="p-4 flex flex-col items-center text-center">
+          <div className="relative">
+            {c.avatarUrl ? <Avatar src={c.avatarUrl} size={96} /> : <div className="w-24 h-24 rounded-full bg-neutral-800 flex items-center justify-center"><Users size={36} className="text-neutral-400" /></div>}
+            {isAdmin && <label className="absolute bottom-0 right-0 bg-violet-600 text-white rounded-full p-1.5 cursor-pointer"><Pencil size={12} /><input type="file" hidden accept="image/*" onChange={e => { if (e.target.files![0]) pickAvatar(e.target.files![0]); e.target.value = ''; }} /></label>}
+          </div>
+          {editing ? (
+            <div className="w-full mt-3 space-y-2">
+              <Input value={title} onChange={e => setTitle(e.target.value)} placeholder="Group name" maxLength={80} />
+              <Input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Group description" maxLength={500} />
+              <div className="flex gap-2">
+                <Btn className="flex-1" onClick={() => { setEditing(false); setTitle(c.title || ''); setDesc(c.description || ''); }} disabled={saving}>Cancel</Btn>
+                <Btn className="flex-1" onClick={save} disabled={saving || !title.trim()}>{saving ? 'Saving…' : 'Save'}</Btn>
+              </div>
+            </div>
+          ) : (
+            <>
+              <h2 className="text-white text-xl font-bold mt-3">{c.title || 'Group'}</h2>
+              <p className="text-neutral-400 text-sm mt-1">{c.description || 'No description'}</p>
+              <p className="text-neutral-600 text-xs mt-1">Created {timeAgo(c.createdAt)} ago · {c.members?.length || 0} members</p>
+              {isAdmin && <button onClick={() => setEditing(true)} className="text-violet-400 text-sm mt-2"><Pencil size={14} className="inline mr-1" />Edit name & description</button>}
+            </>
+          )}
+        </div>
+        {isAdmin && info.requests?.length > 0 && (
+          <div className="px-4 py-3 border-t border-neutral-900">
+            <h3 className="text-white text-sm font-semibold mb-2">Join requests ({info.requests.length})</h3>
+            <div className="space-y-1">
+              {info.requests.map((u: any) => (
+                <div key={u.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-neutral-900">
+                  <Avatar src={u.avatar_url} size={36} />
+                  <div className="flex-1 min-w-0"><div className="text-white text-sm truncate">@{u.username}</div></div>
+                  <Btn className="!px-3 !py-1 !text-xs" onClick={async () => { await api.post(`/conversations/${convId}/requests/${u.id}`, { approve: true }); await load(); onRefresh?.(); toast('approved'); }}>Approve</Btn>
+                  <button className="text-red-400 text-xs px-2" onClick={async () => { await api.post(`/conversations/${convId}/requests/${u.id}`, { approve: false }); await load(); }}>Deny</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {isAdmin && (
+          <div className="px-4 py-3 border-t border-neutral-900 space-y-2">
+            <ToggleRow label="Approve new members" desc="New join links need admin approval" on={!!c.settings?.adminApproval} onToggle={(v: boolean) => toggle('adminApproval', v)} />
+            <ToggleRow label="Only admins can send messages" desc="Members can read but not write" on={!!c.settings?.onlyAdminsPost} onToggle={(v: boolean) => toggle('onlyAdminsPost', v)} />
+          </div>
+        )}
+        {isAdmin && inviteUrl && (
+          <div className="px-4 py-3 border-t border-neutral-900">
+            <h3 className="text-white text-sm font-semibold mb-2">Invite link</h3>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 bg-neutral-900 rounded-xl px-3 py-2 text-xs text-neutral-300 truncate">{inviteUrl}</div>
+              <Btn className="!px-3 !py-1.5" onClick={() => { navigator.clipboard?.writeText(inviteUrl); toast('link copied'); }}>Copy</Btn>
+              <button className="text-red-400 text-xs px-2" onClick={async () => { await api.post(`/conversations/${convId}/invite-link`); await load(); toast('link reset — old link no longer works'); }}>Reset</button>
+            </div>
+          </div>
+        )}
+        <div className="px-4 py-3 border-t border-neutral-900">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-white text-sm font-semibold">{c.members?.length || 0} members</h3>
+            {isAdmin && <button onClick={() => setAddOpen(true)} className="text-violet-400 text-sm font-medium"><Plus size={14} className="inline mr-1" />Add member</button>}
+          </div>
+          <div className="space-y-1">
+            {(c.members || []).map((u: any) => {
+              const mineSelf = u.id === me.id;
+              return (
+                <div key={u.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-neutral-900" onClick={() => !mineSelf && onProfile?.(u.username)}>
+                  <Avatar src={u.avatarUrl} size={40} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-white text-sm truncate">{u.displayName || u.username}{mineSelf && <span className="text-neutral-500"> (you)</span>}</div>
+                    <div className="text-neutral-500 text-xs">@{u.username}</div>
+                  </div>
+                  {u.role !== 'member' && <span className="text-[10px] text-violet-300 bg-violet-900/40 rounded-full px-2 py-0.5">{u.role === 'owner' ? 'Group owner' : 'Admin'}</span>}
+                  {isAdmin && !mineSelf && u.role !== 'owner' && (
+                    <div className="flex gap-1">
+                      <button title={u.role === 'member' ? 'Make admin' : 'Remove admin'} className="p-1.5 text-neutral-400 hover:text-white" onClick={(e) => { e.stopPropagation(); memberAction(u, 'role'); }}><Shield size={14} /></button>
+                      <button title="Remove" className="p-1.5 text-neutral-400 hover:text-red-400" onClick={(e) => { e.stopPropagation(); memberAction(u, 'kick'); }}><UserMinus size={14} /></button>
+                      <button title="Ban" className="p-1.5 text-neutral-400 hover:text-red-400" onClick={(e) => { e.stopPropagation(); memberAction(u, 'ban'); }}><Ban size={14} /></button>
+                      <button title="Mute" className="p-1.5 text-neutral-400 hover:text-red-400" onClick={(e) => { e.stopPropagation(); memberAction(u, 'mute'); }}><MicOff size={14} /></button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <Btn className="w-full mt-4 !bg-red-900/60 !text-red-300 hover:!bg-red-900" onClick={leave}>Leave group</Btn>
+        </div>
+      </div>
+      {addOpen && <AddMembers convId={convId} onClose={() => setAddOpen(false)} onAdded={async () => { await load(); onRefresh?.(); }} toast={toast} />}
+    </div>
+  );
+}
+
+function ToggleRow({ label, desc, on, onToggle }: { label: string; desc: string; on: boolean; onToggle: (v: boolean) => void }) {
+  return (
+    <div className="flex items-center justify-between py-1">
+      <div className="flex-1 pr-3">
+        <div className="text-white text-sm">{label}</div>
+        <div className="text-neutral-500 text-xs">{desc}</div>
+      </div>
+      <button onClick={() => onToggle(!on)} className={`w-11 h-6 rounded-full transition relative ${on ? 'bg-violet-600' : 'bg-neutral-700'}`}>
+        <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all ${on ? 'left-[22px]' : 'left-0.5'}`} />
+      </button>
+    </div>
+  );
+}
+
+function AddMembers({ convId, onClose, onAdded, toast }: any) {
+  const [q, setQ] = useState('');
+  const [users, setUsers] = useState<any[]>([]);
+  const [sel, setSel] = useState<any[]>([]);
+  useEffect(() => { if (q.length > 1) api.get(`/search?q=${encodeURIComponent(q)}`).then(d => setUsers(d.users || [])); else setUsers([]); }, [q]);
+  return (
+    <div className="fixed inset-0 z-[96] bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-sm p-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-white font-semibold mb-3">Add members</h3>
+        <Input placeholder="Search users..." value={q} onChange={e => setQ(e.target.value)} className="mb-3" />
+        <div className="space-y-1 max-h-60 overflow-y-auto">
+          {users.map(u => (
+            <button key={u.id} className="flex items-center gap-3 w-full p-2 hover:bg-neutral-800 rounded-lg text-left" onClick={() => setSel(s => s.some(x => x.id === u.id) ? s : [...s, u])}>
+              <Avatar src={u.avatarUrl} size={32} />
+              <span className="text-white text-sm">@{u.username}</span>
+            </button>
+          ))}
+        </div>
+        <Btn className="w-full mt-3" disabled={!sel.length} onClick={async () => {
+          const d = await api.post(`/conversations/${convId}/members`, { usernames: sel.map(s => s.username) });
+          toast(`${(d.added || sel).length} added`); onAdded(); onClose();
+        }}>Add {sel.length ? `(${sel.length})` : ''}</Btn>
+      </div>
+    </div>
   );
 }
 

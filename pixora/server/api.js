@@ -536,7 +536,8 @@ export async function saveUpload(req, res, { maxBytes = 80 * 1024 * 1024 } = {})
   });
 }
 export async function storeMedia(ownerId, { buf, mime }) {
-  // compress oversized uploads so giant phone videos don't break feeds/db
+  // compress oversized uploads so giant phone videos don't break feeds/db.
+  // tight budget (veryfast + 45s) so the request finishes inside Render's proxy window.
   if (mime.startsWith('video/') && buf.length > 8 * 1024 * 1024) {
     try {
       const { execFile } = await import('child_process');
@@ -544,7 +545,7 @@ export async function storeMedia(ownerId, { buf, mime }) {
       const tmpIn = `/tmp/up-${Date.now()}.bin`;
       const tmpOut = `/tmp/up-${Date.now()}.mp4`;
       fs.writeFileSync(tmpIn, buf);
-      await new Promise((res, rej) => execFile('ffmpeg', ['-y','-loglevel','error','-i',tmpIn,'-c:v','libx264','-preset','fast','-crf','27','-c:a','aac','-b:a','96k','-vf','scale=720:-2','-movflags','+faststart',tmpOut], { timeout: 120000 }, (err) => err ? rej(err) : res()));
+      await new Promise((res, rej) => execFile('ffmpeg', ['-y','-loglevel','error','-i',tmpIn,'-c:v','libx264','-preset','veryfast','-crf','30','-maxrate','1500k','-bufsize','3000k','-c:a','aac','-b:a','64k','-vf','scale=480:-2','-movflags','+faststart',tmpOut], { timeout: 45000 }, (err) => err ? rej(err) : res()));
       const smaller = fs.readFileSync(tmpOut);
       fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut);
       if (smaller.length < buf.length) { buf = smaller; mime = 'video/mp4'; }
@@ -837,7 +838,7 @@ api.get('/me/stories', auth(), wrap(async (req, res) => {
 // ---------------- conversations / messages ----------------
 api.get('/conversations', auth(), wrap(async (req, res) => {
   const { rows } = await q(
-    `SELECT c.id, c.is_group, c.title, c.avatar_url,
+    `SELECT c.id, c.is_group, c.title, c.avatar_url AS "avatarUrl",
       cm.role AS my_role,
       c.description, c.invite_code,
       (SELECT json_agg(json_build_object('id', u2.id, 'username', u2.username, 'displayName', u2.display_name, 'avatarUrl', u2.avatar_url, 'verified', u2.is_verified, 'role', cm3.role, 'lastReadAt', cm3.last_read_at))
@@ -898,6 +899,13 @@ api.get('/conversations/:id/messages', auth(), wrap(async (req, res) => {
 api.post('/conversations/:id/messages', auth(), rateLimit('msg', 300, 60e3), wrap(async (req, res) => {
   const member = await q(`SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
   if (!member.rowCount) return bad(res, 'forbidden', 403);
+  const { rows: [cv] } = await q(`SELECT is_group, settings, muted_members FROM conversations WHERE id=$1`, [req.params.id]);
+  if (cv?.is_group) {
+    const myRole = (await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id])).rows[0]?.role;
+    const isAdmin = ['owner', 'admin', 'moderator'].includes(myRole);
+    if (cv.settings?.onlyAdminsPost && !isAdmin) return bad(res, 'only_admins_can_send', 403);
+    if ((cv.muted_members || []).includes(req.user.id) && !isAdmin) return bad(res, 'you_are_muted', 403);
+  }
   let mediaId = null, kind = 'text', duration = null;
   const b = req.body || {};
   if (b.kind === 'sticker') kind = 'sticker';
@@ -911,9 +919,13 @@ api.post('/conversations/:id/messages', auth(), rateLimit('msg', 300, 60e3), wra
   const payload = { id: m.id, conversationId: m.conversation_id, senderId: m.sender_id, kind, body, mediaUrl: mediaId ? `/media/${mediaId}` : null, durationMs: duration, replyToId: m.reply_to_id, createdAt: m.created_at, sender: { id: req.user.id, username: req.user.username, displayName: req.user.display_name, avatarUrl: req.user.avatar_url } };
   const io = req.app.get('io');
   const { rows: members } = await q(`SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id != $2`, [req.params.id, req.user.id]);
-  // @mentions: notify members the message tags (WhatsApp style)
+  // @mentions: notify members the message tags (WhatsApp style).
+  // @all / @everyone tags every member of the group.
   let mentions = [];
-  if (body) {
+  if (body && /@(all|everyone)\b/i.test(body) && cv?.is_group) {
+    const { rows: musers } = await q(`SELECT id, username FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=$1 AND cm.user_id != $2`, [req.params.id, req.user.id]);
+    mentions = musers;
+  } else if (body) {
     const names = extractMentions(body);
     if (names.length) {
       const { rows: musers } = await q(`SELECT id, username FROM users WHERE username = ANY($1)`, [names]);
@@ -922,6 +934,7 @@ api.post('/conversations/:id/messages', auth(), rateLimit('msg', 300, 60e3), wra
     }
   }
   payload.mentions = mentions.map(u => ({ id: u.id, username: u.username }));
+  payload.mentionsAll = !!(body && /@(all|everyone)\b/i.test(body) && cv?.is_group);
   for (const u of members) {
     io.to(`user:${u.user_id}`).emit('message:new', payload);
     const { rows: [prefs] } = await q(`SELECT settings FROM users WHERE id=$1`, [u.user_id]);
@@ -945,12 +958,21 @@ api.post('/conversations/:id/read', auth(), wrap(async (req, res) => {
 }));
 api.post('/conversations/:id/members', auth(), wrap(async (req, res) => {
   const { rows: [c] } = await q(`SELECT created_by, is_group FROM conversations WHERE id=$1`, [req.params.id]);
-  if (!c || !c.is_group || String(c.created_by) !== String(req.user.id)) return bad(res, 'forbidden', 403);
+  if (!c || !c.is_group) return bad(res, 'forbidden', 403);
+  const { rows: [me] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+  if (!me || !['owner', 'admin', 'moderator'].includes(me.role)) return bad(res, 'forbidden', 403);
+  const added = [];
   for (const uname of req.body?.usernames || []) {
-    const { rows: [u] } = await q(`SELECT id FROM users WHERE username=$1`, [uname]);
-    if (u) await q(`INSERT INTO conversation_members(conversation_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [req.params.id, u.id]);
+    const { rows: [u] } = await q(`SELECT id, username, display_name, avatar_url FROM users WHERE username=$1`, [uname]);
+    if (u) {
+      await q(`INSERT INTO conversation_members(conversation_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [req.params.id, u.id]);
+      added.push(u);
+    }
   }
-  res.json({ ok: true });
+  const io = req.app.get('io');
+  for (const u of added) io.to(`user:${u.id}`).emit('conversation:new', { id: req.params.id });
+  io.to(`conv:${req.params.id}`).emit('conversation:updated', { id: req.params.id });
+  res.json({ ok: true, added: added.map(u => u.username) });
 }));
 
 // ---------------- message actions ----------------
@@ -997,9 +1019,13 @@ api.get('/stickers/mine', auth(), wrap(async (req, res) => {
 }));
 api.post('/stickers/mine', auth(), rateLimit('stickers', 20, 600e3), wrap(async (req, res) => {
   const url = clean(req.body?.mediaUrl || '', 100);
-  if (!/^\/media\/[A-Za-z0-9_-]{1,64}$/.test(url)) return bad(res, 'invalid_media');
-  const { rows: [m] } = await q(`SELECT mime FROM media WHERE id=$1`, [url.split('/').pop()]);
-  if (!m || !m.mime.startsWith('image/')) return bad(res, 'invalid_media');
+  const isMedia = /^\/media\/[A-Za-z0-9_-]{1,64}$/.test(url);
+  const isPack = /^\/stickers\/[a-z0-9_-]{1,32}\.webp$/.test(url);
+  if (!isMedia && !isPack) return bad(res, 'invalid_media');
+  if (isMedia) {
+    const { rows: [m] } = await q(`SELECT mime FROM media WHERE id=$1`, [url.split('/').pop()]);
+    if (!m || !m.mime.startsWith('image/')) return bad(res, 'invalid_media');
+  }
   const cur = req.user.settings?.stickers || [];
   if (cur.includes(url)) return res.json({ stickers: cur });
   const list = [url, ...cur].slice(0, 30);
@@ -1055,31 +1081,66 @@ api.post('/messages/:id/delete', auth(), wrap(async (req, res) => {
 }));
 
 // group management
+api.get('/conversations/:id/info', auth(), wrap(async (req, res) => {
+  const { rows: [mine] } = await q(`SELECT role, muted FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+  if (!mine) return bad(res, 'forbidden', 403);
+  const { rows: [c] } = await q(
+    `SELECT c.id, c.is_group, c.title, c.description, c.avatar_url, c.invite_code, c.settings, c.created_by, c.created_at, c.join_requests,
+      (SELECT json_agg(json_build_object('id', u2.id, 'username', u2.username, 'displayName', u2.display_name, 'avatarUrl', u2.avatar_url, 'role', cm2.role, 'joinedAt', cm2.joined_at))
+        FROM conversation_members cm2 JOIN users u2 ON u2.id=cm2.user_id WHERE cm2.conversation_id=c.id) AS members
+     FROM conversations c WHERE c.id=$1`, [req.params.id]);
+  if (!c) return bad(res, 'not_found', 404);
+  const isAdmin = ['owner', 'admin', 'moderator'].includes(mine.role);
+  let requests = [];
+  if (isAdmin && (c.settings?.adminApproval || (c.join_requests || []).length)) {
+    const { rows } = await q(`SELECT id, username, display_name, avatar_url FROM users WHERE id = ANY($1::uuid[])`, [(c.join_requests || []).length ? c.join_requests : ['00000000-0000-0000-0000-000000000000']]);
+    requests = rows;
+  }
+  res.json({ conversation: { ...c, join_requests: undefined, invite_code: isAdmin ? c.invite_code : undefined }, myRole: mine.role, isAdmin, requests });
+}));
 api.post('/conversations/:id/settings', auth(), wrap(async (req, res) => {
   const { rows: [cm] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!cm || !['owner', 'admin'].includes(cm.role)) return bad(res, 'forbidden', 403);
-  const { title, description } = req.body || {};
+  if (!cm || !['owner', 'admin', 'moderator'].includes(cm.role)) return bad(res, 'forbidden', 403);
+  const { title, description, avatarUrl, adminApproval, onlyAdminsPost } = req.body || {};
   if (title !== undefined) await q(`UPDATE conversations SET title=$2 WHERE id=$1`, [req.params.id, clean(title, 80)]);
   if (description !== undefined) await q(`UPDATE conversations SET description=$2 WHERE id=$1`, [req.params.id, clean(description, 500)]);
+  if (avatarUrl && /^\/media\/[A-Za-z0-9_-]{1,64}$/.test(String(avatarUrl))) await q(`UPDATE conversations SET avatar_url=$2 WHERE id=$1`, [req.params.id, avatarUrl]);
+  const keys = [];
+  const vals = [];
+  if (adminApproval !== undefined) { keys.push('adminApproval'); vals.push(!!adminApproval); }
+  if (onlyAdminsPost !== undefined) { keys.push('onlyAdminsPost'); vals.push(!!onlyAdminsPost); }
+  if (keys.length) {
+    const obj = Object.fromEntries(keys.map((k, i) => [k, vals[i]]));
+    await q(`UPDATE conversations SET settings = settings || $2::jsonb WHERE id=$1`, [req.params.id, JSON.stringify(obj)]);
+  }
+  req.app.get('io').to(`conv:${req.params.id}`).emit('conversation:updated', { id: req.params.id });
   res.json({ ok: true });
 }));
 api.post('/conversations/:id/invite-link', auth(), wrap(async (req, res) => {
   const { rows: [cm] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!cm || !['owner', 'admin'].includes(cm.role)) return bad(res, 'forbidden', 403);
+  if (!cm || !['owner', 'admin', 'moderator'].includes(cm.role)) return bad(res, 'forbidden', 403);
   const code = crypto.randomBytes(8).toString('base64url');
   await q(`UPDATE conversations SET invite_code=$2 WHERE id=$1`, [req.params.id, code]);
   res.json({ inviteCode: code });
 }));
 api.post('/conversations/join/:code', auth(), wrap(async (req, res) => {
-  const { rows: [c] } = await q(`SELECT id, banned_members FROM conversations WHERE invite_code=$1 AND is_group=TRUE`, [req.params.code]);
+  const { rows: [c] } = await q(`SELECT id, banned_members, settings FROM conversations WHERE invite_code=$1 AND is_group=TRUE`, [req.params.code]);
   if (!c) return bad(res, 'invalid_link', 404);
   if ((c.banned_members || []).includes(req.user.id)) return bad(res, 'banned_from_group', 403);
+  if (c.settings?.adminApproval) {
+    await q(`UPDATE conversations SET join_requests = array_append(COALESCE(join_requests, '{}'), $2) WHERE id=$1 AND NOT COALESCE(join_requests, '{}') @> ARRAY[$2]::uuid[]`, [c.id, req.user.id]);
+    const { rows: admins } = await q(`SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND role IN ('owner','admin','moderator')`, [c.id]);
+    for (const a of admins) req.app.get('io').to(`user:${a.user_id}`).emit('conversation:join_request', { conversationId: c.id, userId: req.user.id });
+    return res.json({ conversationId: c.id, pendingApproval: true });
+  }
   await q(`INSERT INTO conversation_members(conversation_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [c.id, req.user.id]);
+  const io = req.app.get('io');
+  io.to(`conv:${c.id}`).emit('conversation:new', { id: c.id });
   res.json({ conversationId: c.id });
 }));
 api.post('/conversations/:id/members/:userId/role', auth(), wrap(async (req, res) => {
   const { rows: [me] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!me || !['owner', 'admin'].includes(me.role)) return bad(res, 'forbidden', 403);
+  if (!me || !['owner', 'admin', 'moderator'].includes(me.role)) return bad(res, 'forbidden', 403);
   const role = req.body?.role;
   if (!['admin', 'member'].includes(role)) return bad(res, 'invalid_role');
   if (me.role !== 'owner' && role === 'admin') return bad(res, 'owner_only_promote', 403);
@@ -1088,7 +1149,7 @@ api.post('/conversations/:id/members/:userId/role', auth(), wrap(async (req, res
 }));
 api.post('/conversations/:id/members/:userId/kick', auth(), wrap(async (req, res) => {
   const { rows: [me] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!me || !['owner', 'admin'].includes(me.role)) return bad(res, 'forbidden', 403);
+  if (!me || !['owner', 'admin', 'moderator'].includes(me.role)) return bad(res, 'forbidden', 403);
   const { rows: [them] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.params.userId]);
   if (!them || them.role === 'owner') return bad(res, 'cannot_kick_owner', 403);
   await q(`DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.params.userId]);
@@ -1096,26 +1157,47 @@ api.post('/conversations/:id/members/:userId/kick', auth(), wrap(async (req, res
 }));
 api.post('/conversations/:id/members/:userId/ban', auth(), wrap(async (req, res) => {
   const { rows: [me] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!me || !['owner', 'admin'].includes(me.role)) return bad(res, 'forbidden', 403);
+  if (!me || !['owner', 'admin', 'moderator'].includes(me.role)) return bad(res, 'forbidden', 403);
   await q(`UPDATE conversations SET banned_members = array_append(COALESCE(banned_members, '{}'), $2) WHERE id=$1`, [req.params.id, req.params.userId]);
   await q(`DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.params.userId]);
   res.json({ ok: true });
 }));
 api.post('/conversations/:id/members/:userId/mute', auth(), wrap(async (req, res) => {
   const { rows: [me] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!me || !['owner', 'admin'].includes(me.role)) return bad(res, 'forbidden', 403);
+  if (!me || !['owner', 'admin', 'moderator'].includes(me.role)) return bad(res, 'forbidden', 403);
   await q(`UPDATE conversations SET muted_members = array_append(COALESCE(muted_members, '{}'), $2) WHERE id=$1`, [req.params.id, req.params.userId]);
   res.json({ ok: true });
 }));
 api.post('/conversations/:id/requests/:userId', auth(), wrap(async (req, res) => {
   const { rows: [cm] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-  if (!cm || !['owner', 'admin'].includes(cm.role)) return bad(res, 'forbidden', 403);
+  if (!cm || !['owner', 'admin', 'moderator'].includes(cm.role)) return bad(res, 'forbidden', 403);
   if (req.body?.approve) {
     await q(`INSERT INTO conversation_members(conversation_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [req.params.id, req.params.userId]);
     await q(`UPDATE conversations SET join_requests = array_remove(join_requests, $2) WHERE id=$1`, [req.params.id, req.params.userId]);
+    req.app.get('io').to(`user:${req.params.userId}`).emit('conversation:new', { id: req.params.id });
+    req.app.get('io').to(`conv:${req.params.id}`).emit('conversation:updated', { id: req.params.id });
   } else {
     await q(`UPDATE conversations SET join_requests = array_remove(join_requests, $2) WHERE id=$1`, [req.params.id, req.params.userId]);
   }
+  res.json({ ok: true });
+}));
+api.post('/conversations/:id/leave', auth(), wrap(async (req, res) => {
+  const { rows: [me] } = await q(`SELECT role FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+  if (!me) return bad(res, 'not_a_member', 403);
+  await q(`DELETE FROM conversation_members WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+  // if the owner leaves, hand ownership to the oldest remaining admin, else member
+  if (me.role === 'owner') {
+    const { rows } = await q(`SELECT user_id, role FROM conversation_members WHERE conversation_id=$1 ORDER BY joined_at`, [req.params.id]);
+    if (rows.length) {
+      const next = rows.find(r => ['admin', 'moderator'].includes(r.role)) || rows[0];
+      await q(`UPDATE conversation_members SET role='owner' WHERE conversation_id=$1 AND user_id=$2`, [req.params.id, next.user_id]);
+      req.app.get('io').to(`conv:${req.params.id}`).emit('conversation:updated', { id: req.params.id });
+    } else {
+      await q(`DELETE FROM conversations WHERE id=$1`, [req.params.id]);
+      return res.json({ ok: true, deleted: true });
+    }
+  }
+  req.app.get('io').to(`conv:${req.params.id}`).emit('conversation:updated', { id: req.params.id });
   res.json({ ok: true });
 }));
 

@@ -531,6 +531,7 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS invite_code TEXT UNIQUE;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS banned_members UUID[];
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS muted_members UUID[];
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS join_requests UUID[];
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
 -- Profile upgrades
 ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_banner TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_theme TEXT;
