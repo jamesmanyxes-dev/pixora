@@ -207,10 +207,12 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
   };
   const onTextInput = (e: any) => {
     setText(e.target.value); onType();
-    // WhatsApp-style @mention autocomplete: @ right before the caret opens the member picker
+    // WhatsApp-style @mention autocomplete. Android keyboards often auto-insert a
+    // space right after @, so also treat "@ " (empty query) as an open picker.
     const caret = e.target.selectionStart ?? e.target.value.length;
-    const m = /@([a-zA-Z0-9_]*)$/.exec(e.target.value.slice(0, caret));
-    setMentionQuery(m ? m[1] : null);
+    const before = e.target.value.slice(0, caret);
+    const m = /@([a-zA-Z0-9_]*)$/.exec(before);
+    setMentionQuery(m ? m[1] : (/@\s$/.test(before) ? '' : null));
   };
   const mentionCandidates = mentionQuery === null ? [] : [
     // WhatsApp shows the full member list the moment you type @ — @all/everyone pinned on top in groups
@@ -218,7 +220,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
     ...(conv?.members || []).filter((u: any) => u.id !== me.id && (!mentionQuery || u.username?.toLowerCase().includes(String(mentionQuery).toLowerCase()))).slice(0, 8),
   ];
   const pickMention = (u: any) => {
-    setText(t => t.replace(/@[a-zA-Z0-9_]*$/, u.__everyone ? '@all ' : `@${u.username} `));
+    setText(t => t.replace(/@[a-zA-Z0-9_]*\s?$/, u.__everyone ? '@all ' : `@${u.username} `));
     setMentionQuery(null);
   };
   const [uploading, setUploading] = useState<string | null>(null); // label of what's uploading
@@ -294,7 +296,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
                     : m.kind !== 'text' ? (m.kind === 'video'
                         ? <video src={m.mediaUrl} controls onClick={() => setViewer({ url: m.mediaUrl!, kind: 'video' })} className="rounded-xl max-h-64 max-w-full cursor-pointer" />
                         : <img src={m.mediaUrl} onClick={() => setViewer({ url: m.mediaUrl!, kind: 'image' })} className="rounded-xl max-h-64 max-w-full cursor-pointer" alt="attachment" />)
-                      : <span className="text-sm whitespace-pre-wrap break-words break-all"><RenderBody body={m.body} members={conv?.members} mineMsg={mineMsg} />{m.edited && <span className="text-[10px] opacity-60 ml-1">(edited)</span>}</span>}
+                      : <span className="text-sm whitespace-pre-wrap break-words break-all"><RenderBody body={m.body} members={conv?.members} mineMsg={mineMsg} onMention={(u: string) => onProfile?.(u)} />{m.edited && <span className="text-[10px] opacity-60 ml-1">(edited)</span>}</span>}
                 <div className={`text-[10px] mt-1 flex items-center gap-1 justify-end ${mineMsg ? 'text-violet-200' : 'text-neutral-500'}`}>
                   {m.starred && <span>★</span>}
                   {timeAgo(m.createdAt)}
@@ -309,7 +311,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
                 )}
               </div>
               {!m.deleted && (
-                <div className={`absolute top-0 ${mineMsg ? 'right-full mr-1' : 'left-full ml-1'} hidden group-hover:flex items-center gap-0.5 bg-neutral-900 border border-neutral-800 rounded-lg px-1 py-0.5`}>
+                <div className={`absolute -top-9 ${mineMsg ? 'right-0' : 'left-0'} hidden group-hover:flex items-center gap-0.5 bg-neutral-900 border border-neutral-800 rounded-lg px-1 py-0.5 shadow-lg`}>
                   {mineMsg ? <>
                     <button title="Edit" className="p-1 text-neutral-400 hover:text-white" onClick={() => {
                       const nv = prompt('Edit message', m.body);
@@ -377,7 +379,7 @@ function ChatView({ convId, me, socket, onBack, onProfile, toast, onCall }: any)
             setActionMsg(null);
           }}
           onReply={() => { setReplyTo(actionMsg); setActionMsg(null); }}
-          onFavorite={async () => { await api.post('/stickers/mine', { mediaUrl: actionMsg.body }); toast('added to favorites'); setActionMsg(null); }}
+          onFavorite={async () => { const ref = actionMsg.body || actionMsg.mediaUrl; if (ref) { await api.post('/stickers/mine', { mediaUrl: ref }); toast('added to favorites'); } setActionMsg(null); }}
           onForward={() => { setFwdOpen(actionMsg); setActionMsg(null); }}
           onStar={async () => { const d = await api.post(`/messages/${actionMsg.id}/star`); setMessages(ms => ms.map(x => x.id === actionMsg.id ? { ...x, starred: d.starred } : x)); setActionMsg(null); }}
           onPin={async () => { const d = await api.post(`/messages/${actionMsg.id}/pin`); setMessages(ms => ms.map(x => x.id === actionMsg.id ? { ...x, pinned: d.pinned } : x)); setActionMsg(null); }}
@@ -443,14 +445,15 @@ function StickerBody({ ref: sref, mediaMime }: { ref: string; mediaMime?: string
   return <span className="text-sm break-all whitespace-pre-wrap">{sref}</span>;
 }
 
-function RenderBody({ body, members, mineMsg }: { body: string; members?: any[]; mineMsg: boolean }) {
+function RenderBody({ body, members, mineMsg, onMention }: { body: string; members?: any[]; mineMsg: boolean; onMention?: (username: string) => void }) {
   if (!body) return null;
   const names = new Set((members || []).map((u: any) => String(u.username || '').toLowerCase()).filter(Boolean));
   const parts = body.split(/(@[a-zA-Z0-9._]{3,30})/g);
+  const cls = `font-semibold rounded px-0.5 ${mineMsg ? 'bg-violet-500/50 text-white' : 'bg-violet-600/50 text-violet-100'}`;
   return <>{parts.map((p, i) => (p.toLowerCase() === '@all' || p.toLowerCase() === '@everyone')
-    ? <span key={i} className={`font-semibold rounded px-0.5 ${mineMsg ? 'bg-violet-500/50 text-white' : 'bg-violet-600/50 text-violet-100'}`}>{p}</span>
+    ? <span key={i} className={cls}>{p}</span>
     : p.startsWith('@') && names.has(p.slice(1).toLowerCase())
-    ? <span key={i} className={`font-semibold rounded px-0.5 ${mineMsg ? 'bg-violet-500/50 text-white' : 'bg-violet-600/50 text-violet-100'}`}>{p}</span>
+    ? <span key={i} className={cls} onClick={(e) => { e.stopPropagation(); onMention?.(p.slice(1)); }}>{p}</span>
     : <span key={i}>{p}</span>)}</>;
 }
 
