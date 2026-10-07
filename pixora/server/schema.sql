@@ -586,3 +586,9 @@ CREATE TABLE IF NOT EXISTS channel_reactions (
   emoji TEXT NOT NULL DEFAULT '🔥',
   PRIMARY KEY (post_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

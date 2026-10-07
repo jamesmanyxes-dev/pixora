@@ -6,7 +6,7 @@ import { Server } from 'socket.io';
 import fs from 'fs';
 import { migrate, q } from './migrate.js';
 import { setupRealtime } from './realtime.js';
-import { api } from './api.js';
+import { api, initVapid } from './api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -86,5 +86,6 @@ setInterval(async () => {
 
 const PORT = process.env.PORT || 3001;
 await migrate();
+await initVapid();
 setupRealtime(io);
 server.listen(PORT, () => console.log(`PIXORA listening on :${PORT}`));

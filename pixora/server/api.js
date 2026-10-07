@@ -56,9 +56,33 @@ async function loadPost(id, meId) {
 }
 
 // ---------------- config / public ----------------
+// VAPID keys: Render env vars first, app_settings table as fallback (set via SQL when
+// the dashboard env save isn't available). Loaded at boot by initVapid().
+let vapidPublic = process.env.PUSH_VAPID_PUBLIC || null;
+let vapidPrivate = process.env.PUSH_VAPID_PRIVATE || null;
+let vapidReady = false;
+export async function initVapid() {
+  try {
+    if (!vapidPublic || !vapidPrivate) {
+      const { rows } = await q(`SELECT key, value FROM app_settings WHERE key IN ('push_vapid_public','push_vapid_private')`);
+      for (const r of rows) {
+        if (r.key === 'push_vapid_public' && !vapidPublic) vapidPublic = r.value;
+        if (r.key === 'push_vapid_private' && !vapidPrivate) vapidPrivate = r.value;
+      }
+    }
+    if (vapidPublic && vapidPrivate) {
+      const webpush = (await import('web-push')).default;
+      webpush.setVapidDetails('mailto:' + (process.env.OWNER_EMAIL || 'owner@pixora.app'), vapidPublic, vapidPrivate);
+      vapidReady = true;
+      console.log('push: VAPID keys configured');
+    } else {
+      console.log('push: no VAPID keys found — push disabled');
+    }
+  } catch (e) { console.error('push: VAPID init failed:', e.message); }
+}
 api.get('/config', (req, res) => res.json({
   googleClientId: process.env.GOOGLE_CLIENT_ID || null,
-  vapidPublicKey: process.env.PUSH_VAPID_PUBLIC || null,
+  vapidPublicKey: vapidPublic,
   smsConfigured: !!process.env.TWILIO_ACCOUNT_SID,
   mailConfigured: !!process.env.RESEND_API_KEY,
 }));
@@ -1422,14 +1446,7 @@ api.post('/admin/messages/:id/action', auth(true), ownerOnly, wrap(async (req, r
 }));
 
 // ---------------- push notifications ----------------
-let vapidReady = false;
-try {
-  if (process.env.PUSH_VAPID_PUBLIC && process.env.PUSH_VAPID_PRIVATE) {
-    const webpush = (await import('web-push')).default;
-    webpush.setVapidDetails('mailto:' + (process.env.OWNER_EMAIL || 'owner@pixora.app'), process.env.PUSH_VAPID_PUBLIC, process.env.PUSH_VAPID_PRIVATE);
-    vapidReady = true;
-  }
-} catch {}
+// vapidPublic/vapidPrivate/vapidReady are set up by initVapid() (called from index.js after migrate).
 export async function sendPush(userId, title, body, data) {
   if (!vapidReady) return;
   try {
